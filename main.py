@@ -184,6 +184,9 @@ def main():
         st.session_state.excel_data = None
     if 'custom_products' not in st.session_state:
         st.session_state.custom_products = []  # Список добавленных пользователем продуктов
+    if 'custom_products_by_okpd' not in st.session_state:
+        st.session_state.custom_products_by_okpd = {}  # Пользовательские продукты по ОКПД
+
     # ========== САЙДБАР ДЛЯ ЗАГРУЗКИ ФАЙЛОВ ==========
     with st.sidebar:
         st.header("📁 Загрузка отчетности")
@@ -372,8 +375,6 @@ def main():
         st.session_state.project_data.years = list(range(start_year, end_year + 1))
 
         # ========== БЛОК 4: ВЫБОР ПРОДУКЦИИ И ОБЪЕМОВ ==========
-        # Таблица для ввода объемов
-        # НОВЫЙ БЛОК: Выбор ОКПД и объемов продукции
         st.subheader("📦 Выбор продукции и объемов")
 
         # УНИВЕРСАЛЬНЫЙ справочник ОКПД2 для всех отраслей
@@ -539,78 +540,122 @@ def main():
                 help="Выберите код ОКПД2 для вашего типа продукции"
             )
 
-            # Показываем описание выбранного ОКПД
-            if selected_okpd in sector_codes:
-                st.info(f"**Выбрано:** {sector_codes[selected_okpd]}")
 
         # УНИВЕРСАЛЬНЫЙ справочник типов продукции для всех ОКПД
         product_types_mapping = {
-            # Сельское хозяйство
             "01.11": ["Пшеница", "Ячмень, рожь и овес", "Овес", "Кукуруза", "Сорго, просо и прочие зерновые культуры"],
             "01.12": ["Картофель", "Морковь", "Капуста", "Лук", "Томаты", "Огурцы"],
             "01.13": ["Яблоки", "Груши", "Вишня", "Слива", "Смородина", "Малина"],
             "01.21": ["Говядина", "Молоко", "Мясо КРС"],
             "01.22": ["Свинина", "Мясо свиней"],
             "01.23": ["Куриное мясо", "Яйца", "Мясо индейки"],
-
-            # Добыча полезных ископаемых
             "05.10": ["Каменный уголь", "Бурый уголь"],
             "06.10": ["Сырая нефть", "Газовый конденсат"],
             "06.20": ["Природный газ"],
             "07.10": ["Железная руда", "Железорудный концентрат"],
-
-            # Металлургия
             "24.10": ["Чугун передельный", "Чугун литейный", "Сталь углеродистая", "Сталь легированная"],
             "24.20": ["Трубы бесшовные", "Трубы сварные", "Трубы профильные"],
             "24.31": ["Прокат листовой", "Прокат сортовой", "Прокат фасонный"],
             "24.41": ["Золото", "Серебро", "Платина"],
             "24.42": ["Алюминий первичный", "Алюминиевые сплавы"],
-
-            # Химическая промышленность
             "20.13": ["Этилен", "Пропилен", "Бензол", "Метанол"],
             "20.15": ["Азотные удобрения", "Фосфорные удобрения", "Калийные удобрения"],
             "20.16": ["Полиэтилен", "Полипропилен", "ПВХ", "Полистирол"],
-
-            # Машиностроение
             "28.11": ["Дизельные двигатели", "Газовые турбины", "Паровые турбины"],
             "29.10": ["Легковые автомобили", "Грузовые автомобили", "Автобусы"],
-
-            # Пищевая промышленность
             "10.11": ["Говядина", "Свинина", "Баранина", "Мясо птицы"],
             "10.12": ["Молоко", "Сыр", "Йогурт", "Сливочное масло", "Творог"],
             "10.71": ["Хлеб", "Булочки", "Пироги", "Печенье"],
-
-            # Деревообработка
             "16.10": ["Пиломатериалы хвойные", "Пиломатериалы лиственные", "Древесные плиты"],
-
-            # Энергетика
             "35.11": ["Электроэнергия"],
             "35.21": ["Природный газ", "Сжиженный газ"],
-
-            # Универсальные типы для кодов без специфики
             "default": ["Основная продукция", "Побочная продукция", "Полуфабрикаты"]
         }
 
-        # Получаем типы продукции для выбранного ОКПД
-        current_product_types = product_types_mapping.get(selected_okpd, product_types_mapping["default"])
+        # Получаем ВСЕ возможные типы продукции для выбранного ОКПД
+        default_product_types = product_types_mapping.get(selected_okpd, product_types_mapping["default"]).copy()
+
+        # Добавляем сохраненные пользовательские типы для этого ОКПД
+        custom_types = st.session_state.custom_products_by_okpd.get(selected_okpd, [])
+        all_product_types = default_product_types + custom_types
 
         # Возможность добавить свой тип продукции
-        add_custom_product = st.checkbox("Добавить свой тип продукции")
-        if add_custom_product:
-            custom_product = st.text_input("Название типа продукции:")
-            if custom_product and custom_product not in current_product_types:
-                current_product_types.append(custom_product)
+        st.markdown("---")
+        st.subheader("➕ Добавление нового типа продукции")
 
-        # Создаем таблицы для каждого типа продукции
-        st.subheader("Ввод объемов производства по типам продукции")
+        col_add1, col_add2 = st.columns([3, 1])
+        with col_add1:
+            new_product = st.text_input("Название нового типа продукции:", key=f"new_product_{selected_okpd}")
+        with col_add2:
+            if st.button("➕ Добавить", key=f"add_btn_{selected_okpd}"):
+                if new_product and new_product not in all_product_types:
+                    if selected_okpd not in st.session_state.custom_products_by_okpd:
+                        st.session_state.custom_products_by_okpd[selected_okpd] = []
+                    if new_product not in st.session_state.custom_products_by_okpd[selected_okpd]:
+                        st.session_state.custom_products_by_okpd[selected_okpd].append(new_product)
+                        st.success(f"✅ Добавлен тип продукции: {new_product}")
+                        st.rerun()
+                elif new_product in all_product_types:
+                    st.warning("⚠️ Такой тип продукции уже существует")
 
-        # ПОЛУЧАЕМ ГОДЫ ИЗ SESSION_STATE
-        years_list = st.session_state.project_data.years
-        if not years_list:
-            st.warning("Сначала укажите диапазон лет в блоке 'Диапазон лет'")
-            years_list = []
+        # Отображаем кнопку для сброса пользовательских типов
+        if custom_types:
+            if st.button("🗑️ Удалить все добавленные типы", key=f"reset_custom_{selected_okpd}"):
+                st.session_state.custom_products_by_okpd[selected_okpd] = []
+                st.rerun()
 
-        # Определяем единицы измерения в зависимости от отрасли
+        st.markdown("---")
+
+        # Обновляем all_product_types после возможного добавления
+        all_product_types = default_product_types + st.session_state.custom_products_by_okpd.get(selected_okpd, [])
+
+        # ========== ВЫБОР ПРОДУКТОВ ДЛЯ РАСЧЕТА ==========
+        st.subheader("✅ Выберите продукты для анализа")
+
+        # Инициализация выбранных продуктов в session_state
+        selection_key = f"selected_products_{selected_okpd}"
+        if selection_key not in st.session_state:
+            st.session_state[selection_key] = {product: True for product in all_product_types}
+
+        # Отображаем чекбоксы для каждого продукта
+        cols = st.columns(4)
+        for idx, product in enumerate(all_product_types):
+            col_idx = idx % 4
+            with cols[col_idx]:
+                is_custom = product in custom_types
+                label = f"🆕 {product}" if is_custom else product
+
+                st.session_state[selection_key][product] = st.checkbox(
+                    label,
+                    value=st.session_state[selection_key].get(product, True),
+                    key=f"chk_{selected_okpd}_{product}"
+                )
+
+                if is_custom:
+                    if st.button("❌", key=f"del_{selected_okpd}_{product}", help="Удалить этот тип"):
+                        if product in st.session_state.custom_products_by_okpd[selected_okpd]:
+                            st.session_state.custom_products_by_okpd[selected_okpd].remove(product)
+                            if product in st.session_state[selection_key]:
+                                del st.session_state[selection_key][product]
+                            st.rerun()
+
+
+
+        # Получаем список ТОЛЬКО выбранных продуктов
+        selected_products = [
+            product for product in all_product_types
+            if st.session_state[selection_key].get(product, False)
+        ]
+
+
+
+
+        st.divider()
+
+        # ========== ВВОД ДАННЫХ ТОЛЬКО ДЛЯ ВЫБРАННЫХ ПРОДУКТОВ ==========
+        st.subheader("📊 Ввод объемов и цен для выбранных продуктов")
+
+        # Определяем единицы измерения
         measurement_units = {
             "Продукция сельского, лесного и рыбного хозяйства": "тонн",
             "ДОБЫЧА ПОЛЕЗНЫХ ИСКОПАЕМЫХ": "тонн",
@@ -621,47 +666,62 @@ def main():
             "ТРАНСПОРТ": "пассажиро-км",
             "УСЛУГИ": "услуг"
         }
-
         unit = measurement_units.get(selected_sector, "ед.")
+        years_list = st.session_state.project_data.years
 
-        # Создаем вкладки для каждого типа продукции
-        if len(current_product_types) > 1:
-            product_tabs = st.tabs(current_product_types)
-        else:
-            product_tabs = [st.container()]
-
-        # Словарь для хранения объемов по типам продукции
+        # Словари для хранения данных
         product_volumes = {}
-
         product_export_shares = {}
         product_import_shares = {}
+        product_base_prices = {}
 
-        for i, product_type in enumerate(current_product_types):
-            with product_tabs[i]:
-                st.write(f"**{product_type}**")
+        # Для каждого выбранного продукта создаем свой блок
+        for product_idx, product_type in enumerate(selected_products):
+            st.markdown(f"### {product_idx + 1}. {product_type}")
 
-                # Создаем DataFrame
+            col_price, col_vol = st.columns([1, 2])
+
+            with col_price:
+                price_key = f"price_{selected_okpd}_{product_type}"
+                default_price = st.session_state.get(price_key, 1000.0)
+                base_price = st.number_input(
+                    f"Базовая цена (руб.)",
+                    value=default_price,
+                    step=100.0,
+                    key=price_key
+                )
+                product_base_prices[product_type] = base_price
+
+            with col_vol:
+                st.write("**Объемы производства по годам**")
+
                 volumes_data = []
-                for year in years_list:  # ИСПРАВЛЕНО: years_list вместо years_range
+                for year in years_list:
+                    volume_key = f"volume_{selected_okpd}_{product_type}_{year}"
+                    export_key = f"export_{selected_okpd}_{product_type}_{year}"
+
+                    default_volume = st.session_state.get(volume_key, 0.0)
+                    default_export = st.session_state.get(export_key, 0.0)
+
                     volumes_data.append({
                         'Год': year,
-                        f'Объем ({unit})': 0.0,
-                        'Доля экспорта (%)': 0.0,
-                        'Доля импорта (%)': 100.0  # Начальное значение
+                        f'Объем ({unit})': default_volume,
+                        'Доля экспорта (%)': default_export,
+                        'Доля импорта (%)': 100.0 - default_export
                     })
 
-                df = pd.DataFrame(volumes_data)
+                df_volumes = pd.DataFrame(volumes_data)
 
-                # Редактируемая таблица
                 edited_df = st.data_editor(
-                    df,
-                    key=f"editor_{selected_okpd}_{product_type}_{i}",
+                    df_volumes,
+                    key=f"editor_{selected_okpd}_{product_type}",
                     num_rows="fixed",
                     column_config={
                         'Год': st.column_config.NumberColumn(disabled=True),
                         f'Объем ({unit})': st.column_config.NumberColumn(
-                            format="%.0f",
-                            min_value=0.0
+                            format="%.3f",
+                            min_value=0.0,
+                            step=0.001
                         ),
                         'Доля экспорта (%)': st.column_config.NumberColumn(
                             format="%.1f",
@@ -676,351 +736,211 @@ def main():
                     }
                 )
 
-                # АВТОМАТИЧЕСКИ ПЕРЕСЧИТЫВАЕМ ИМПОРТ ПОСЛЕ РЕДАКТИРОВАНИЯ
-                final_df = edited_df.copy()
-                for idx in range(len(final_df)):
-                    export_value = float(final_df.at[idx, 'Доля экспорта (%)'])
-                    # Ограничиваем значение от 0 до 100
-                    export_value = max(0.0, min(100.0, export_value))
-                    import_value = 100.0 - export_value
-
-                    # Обновляем значение в DataFrame
-                    final_df.at[idx, 'Доля импорта (%)'] = import_value
-                    final_df.at[idx, 'Доля экспорта (%)'] = export_value
-
-                # Показываем таблицу с уже обновленными значениями
-                st.dataframe(
-                    final_df.style.format({
-                        f'Объем ({unit})': '{:.0f}',
-                        'Доля экспорта (%)': '{:.1f}',
-                        'Доля импорта (%)': '{:.1f}'
-                    }),
-                    use_container_width=True,
-                    hide_index=True
-                )
-
-                # Сохраняем данные для расчетов ИЗ ОБНОВЛЕННОГО DataFrame
                 product_volumes[product_type] = {}
                 product_export_shares[product_type] = {}
                 product_import_shares[product_type] = {}
 
-                for _, row in final_df.iterrows():
+                for _, row in edited_df.iterrows():
                     year = int(row['Год'])
-                    product_volumes[product_type][year] = float(row[f'Объем ({unit})'])
-                    product_export_shares[product_type][year] = float(row['Доля экспорта (%)']) / 100
-                    product_import_shares[product_type][year] = float(row['Доля импорта (%)']) / 100
+                    volume = float(row[f'Объем ({unit})'])
+                    export_pct = float(row['Доля экспорта (%)'])
+                    export_pct = max(0.0, min(100.0, export_pct))
+                    import_pct = 100.0 - export_pct
 
-                # Показываем итого по продукту с проверкой
+                    product_volumes[product_type][year] = volume
+                    product_export_shares[product_type][year] = export_pct / 100
+                    product_import_shares[product_type][year] = import_pct / 100
+
+                    st.session_state[f"volume_{selected_okpd}_{product_type}_{year}"] = volume
+                    st.session_state[f"export_{selected_okpd}_{product_type}_{year}"] = export_pct
+
                 total_volume = sum(product_volumes[product_type].values())
-                avg_export_share = sum(product_export_shares[product_type].values()) / len(
-                    years_list) * 100 if years_list else 0  # ИСПРАВЛЕНО
-                avg_import_share = sum(product_import_shares[product_type].values()) / len(
-                    years_list) * 100 if years_list else 0  # ИСПРАВЛЕНО
+                avg_export = sum(product_export_shares[product_type].values()) / len(
+                    years_list) * 100 if years_list else 0
 
-                col1, col2, col3 = st.columns(3)
+                col1, col2 = st.columns(2)
                 with col1:
-                    st.metric(f"Общий объем", f"{total_volume:,.0f} {unit}")
+                    st.metric(f"📦 Общий объем", f"{total_volume:,.3f} {unit}")
                 with col2:
-                    st.metric(f"Средняя доля экспорта", f"{avg_export_share:.1f}%")
-                with col3:
-                    st.metric(f"Средняя доля импорта", f"{avg_import_share:.1f}%")
+                    st.metric(f"📤 Средний экспорт", f"{avg_export:.1f}%")
 
-                # Проверка: сумма долей должна быть 100%
-                for year in years_list:  # ИСПРАВЛЕНО
-                    export_share = product_export_shares[product_type].get(year, 0)
-                    import_share = product_import_shares[product_type].get(year, 0)
-                    if abs((export_share + import_share) - 1.0) > 0.001:  # Допуск 0.1%
-                        st.error(
-                            f"Ошибка в {year}: экспорт ({export_share * 100:.1f}%) + импорт ({import_share * 100:.1f}%) ≠ 100%")
+            st.divider()
 
-        # Сохраняем в session_state для использования в других вкладках
+        # Сохраняем в session_state
         st.session_state.product_volumes = product_volumes
         st.session_state.product_export_shares = product_export_shares
         st.session_state.product_import_shares = product_import_shares
+        st.session_state.product_base_prices = product_base_prices
 
+        # ========== БЛОК 5: ЦЕНЫ (общие индексы и дефляторы) ==========
+        st.subheader("💰 Ценовые индексы и дефляторы")
 
-
-        # Общие объемы по всем типам продукции
-        if product_volumes:
-            with st.expander("📊 Сводка по объемам производства и экспорту", expanded=False):
-                st.subheader("📊 Сводка по объемам производства и экспорту")
-                # Создаем сводную таблицу
-                summary_data = []
-                for year in years_list:  # ИСПРАВЛЕНО
-                    year_data = {'Год': year}
-                    year_total_volume = 0
-                    year_total_export_volume = 0
-                    year_total_import_volume = 0
-
-                    for product_type in current_product_types:
-                        volume = product_volumes.get(product_type, {}).get(year, 0)
-                        export_share = product_export_shares.get(product_type, {}).get(year, 0)
-                        import_share = product_import_shares.get(product_type, {}).get(year, 0)
-
-                        year_data[f'{product_type} - Объем'] = volume
-                        year_data[f'{product_type} - Экспорт'] = volume * export_share
-                        year_data[f'{product_type} - Импорт'] = volume * import_share
-
-                        year_total_volume += volume
-                        year_total_export_volume += volume * export_share
-                        year_total_import_volume += volume * import_share
-
-                    year_data['Общий объем'] = year_total_volume
-                    year_data['Экспорт всего'] = year_total_export_volume
-                    year_data['Импорт всего'] = year_total_import_volume
-                    year_data['Доля экспорта (%)'] = (
-                            year_total_export_volume / year_total_volume * 100) if year_total_volume > 0 else 0
-                    year_data['Доля импорта (%)'] = (
-                            year_total_import_volume / year_total_volume * 100) if year_total_volume > 0 else 0
-
-                    summary_data.append(year_data)
-
-                summary_df = pd.DataFrame(summary_data)
-
-                # Форматируем таблицу
-                format_dict = {}
-                for col in summary_df.columns:
-                    if 'Объем' in col or 'Экспорт' in col or 'Импорт' in col:
-                        format_dict[col] = '{:,.0f}'
-                    elif 'Доля' in col:
-                        format_dict[col] = '{:.1f}%'
-
-                st.dataframe(summary_df.style.format(format_dict))
-
-            # График объемов производства с разбивкой на экспорт/импорт
-            with st.expander("📈 Объемы производства с разбивкой на экспорт и импорт", expanded=False):
-                st.subheader("📈 Объемы производства с разбивкой на экспорт и импорт")
-
-                fig_volumes_breakdown = go.Figure()
-
-                for product_type in current_product_types:
-                    # Экспортные объемы
-                    export_volumes = []
-                    import_volumes = []
-                    for year in years_list:  # ИСПРАВЛЕНО
-                        volume = product_volumes.get(product_type, {}).get(year, 0)
-                        export_share = product_export_shares.get(product_type, {}).get(year, 0)
-                        import_share = product_import_shares.get(product_type, {}).get(year, 0)
-                        export_volumes.append(volume * export_share)
-                        import_volumes.append(volume * import_share)
-
-                    # Стек для экспорта
-                    fig_volumes_breakdown.add_trace(go.Bar(
-                        name=f'{product_type} - Экспорт',
-                        x=years_list,  # ИСПРАВЛЕНО
-                        y=export_volumes,
-                        hovertemplate=f"{product_type} - Экспорт<br>Год: %{{x}}<br>Объем: %{{y:,.0f}} {unit}<extra></extra>",
-                        marker_color='#1f77b4'
-                    ))
-
-                    # Стек для импорта
-                    fig_volumes_breakdown.add_trace(go.Bar(
-                        name=f'{product_type} - Импорт',
-                        x=years_list,  # ИСПРАВЛЕНО
-                        y=import_volumes,
-                        hovertemplate=f"{product_type} - Импорт<br>Год: %{{x}}<br>Объем: %{{y:,.0f}} {unit}<extra></extra>",
-                        marker_color='#ff7f0e'
-                    ))
-
-                fig_volumes_breakdown.update_layout(
-                    title="Распределение объемов на экспорт и импорт",
-                    xaxis_title="Год",
-                    yaxis_title=f"Объем, {unit}",
-                    barmode='stack',
-                    height=500,
-                    showlegend=True
-                )
-                st.plotly_chart(fig_volumes_breakdown, use_container_width=True)
-
-            # График долей экспорта/импорта
-            with st.expander("📊 Доли экспорта и импорта по годам", expanded=False):
-                st.subheader("📊 Доли экспорта и импорта по годам")
-
-                fig_shares = go.Figure()
-
-                export_shares_total = []
-                import_shares_total = []
-                for year in years_list:  # ИСПРАВЛЕНО
-                    total_volume = sum(
-                        product_volumes.get(product_type, {}).get(year, 0) for product_type in current_product_types)
-                    total_export = sum(
-                        product_volumes.get(product_type, {}).get(year, 0) * product_export_shares.get(product_type,
-                                                                                                       {}).get(year, 0)
-                        for
-                        product_type in current_product_types)
-                    total_import = sum(
-                        product_volumes.get(product_type, {}).get(year, 0) * product_import_shares.get(product_type,
-                                                                                                       {}).get(year, 0)
-                        for
-                        product_type in current_product_types)
-
-                    export_share = (total_export / total_volume * 100) if total_volume > 0 else 0
-                    import_share = (total_import / total_volume * 100) if total_volume > 0 else 0
-
-                    export_shares_total.append(export_share)
-                    import_shares_total.append(import_share)
-
-                fig_shares.add_trace(go.Scatter(
-                    name='Доля экспорта',
-                    x=years_list,  # ИСПРАВЛЕНО
-                    y=export_shares_total,
-                    mode='lines+markers',
-                    line=dict(color='#1f77b4', width=3),
-                    marker=dict(size=8)
-                ))
-
-                fig_shares.add_trace(go.Scatter(
-                    name='Доля импорта',
-                    x=years_list,  # ИСПРАВЛЕНО
-                    y=import_shares_total,
-                    mode='lines+markers',
-                    line=dict(color='#ff7f0e', width=3),
-                    marker=dict(size=8)
-                ))
-
-                fig_shares.update_layout(
-                    title="Динамика долей экспорта и импорта",
-                    xaxis_title="Год",
-                    yaxis_title="Доля, %",
-                    yaxis_range=[0, 100],
-                    height=400
-                )
-                st.plotly_chart(fig_shares, use_container_width=True)
-
-            # ========== БЛОК 5: ЦЕНЫ ==========
-            st.subheader("💰 Цены")
-
-            col1, col2 = st.columns(2)
-            with col1:
-                base_price = st.number_input("Базовая цена (руб.)", value=1000.0, step=100.0)
-
-            with col2:
-                if st.session_state.project_data.years:
-                    base_year = st.selectbox("Базовый год", st.session_state.project_data.years)
-
-            # Индексы цен по годам - ТОЧНО КАК В БЛОКАХ С ОБЪЕМАМИ
+        # Инициализация структур для хранения индексов
+        if 'price_indices_temp' not in st.session_state:
+            st.session_state.price_indices_temp = {}
+        if 'base_year' not in st.session_state:
             if st.session_state.project_data.years:
-                st.write("**Ценовые индексы по годам (базовый год = 1.00):**")
+                st.session_state.base_year = st.session_state.project_data.years[0]
+            else:
+                st.session_state.base_year = 2024
 
-                # Создаем DataFrame (как в объемах)
-                price_data = []
-                for year in st.session_state.project_data.years:
-                    # Пытаемся получить сохраненные данные
-                    if st.session_state.project_data.prices and f"index_{year}" in st.session_state.project_data.prices:
-                        default_index = st.session_state.project_data.prices[f"index_{year}"]
+        # Выбор базового года
+        if st.session_state.project_data.years:
+            current_index = 0
+            if st.session_state.base_year in st.session_state.project_data.years:
+                current_index = st.session_state.project_data.years.index(st.session_state.base_year)
+            else:
+                current_index = 0
+                st.session_state.base_year = st.session_state.project_data.years[0]
+
+            st.session_state.base_year = st.selectbox(
+                "Базовый год для дефлятора",
+                st.session_state.project_data.years,
+                index=current_index,
+                key="base_year_select"
+            )
+
+        if st.session_state.project_data.years:
+            st.write("**Ценовые индексы по годам (базовый год = 1.00):**")
+
+            # Уникальный ключ для редактора
+            editor_key = f"price_editor_{hash(str(st.session_state.project_data.years))}_{st.session_state.base_year}"
+
+            # Создаем DataFrame с текущими значениями
+            price_data = []
+            for year in st.session_state.project_data.years:
+                if year in st.session_state.price_indices_temp:
+                    default_index = st.session_state.price_indices_temp[year]
+                elif year in st.session_state.project_data.price_indices:
+                    default_index = st.session_state.project_data.price_indices[year]
+                else:
+                    default_index = 1.0 if year == st.session_state.base_year else 1.0
+                price_data.append({'Год': year, 'Ценовой индекс': default_index})
+
+            df = pd.DataFrame(price_data)
+
+            # Редактируемая таблица индексов
+            edited_df = st.data_editor(
+                df,
+                key=editor_key,
+                num_rows="fixed",
+                column_config={
+                    'Год': st.column_config.NumberColumn(disabled=True),
+                    'Ценовой индекс': st.column_config.NumberColumn(
+                        format="%.5f",
+                        min_value=0.0,
+                        max_value=10.0,
+                        step=0.0001
+                    )
+                }
+            )
+
+            # Обновляем значения индексов
+            need_update = False
+            for _, row in edited_df.iterrows():
+                year = int(row['Год'])
+                index = float(row['Ценовой индекс'])
+
+                old_index = st.session_state.price_indices_temp.get(year, 0)
+                if abs(old_index - index) > 0.00001:
+                    need_update = True
+                    st.session_state.price_indices_temp[year] = index
+                    st.session_state.project_data.price_indices[year] = index
+
+            if need_update:
+                st.rerun()
+
+            # ========== РАСЧЕТ ЦЕН ПО ПРОДУКТАМ И ГОДАМ ==========
+            if st.session_state.price_indices_temp and hasattr(st.session_state, 'product_base_prices'):
+                st.subheader("📊 Расчет цен по продуктам и годам")
+
+                # Функция расчета дефлятора
+                def calculate_deflator(year, base_year, price_indices):
+                    if year == base_year:
+                        return 1.0
+                    if year > base_year:
+                        result = 1.0
+                        for y in range(base_year + 1, year + 1):
+                            result *= price_indices.get(y, 1.0)
+                        return result
                     else:
-                        default_index = 1.0 if year == base_year else 1.0
-                    price_data.append({'Год': year, 'Ценовой индекс': default_index})
+                        result = 1.0
+                        for y in range(year + 1, base_year + 1):
+                            result *= price_indices.get(y, 1.0)
+                        return 1.0 / result if result != 0 else 1.0
 
-                df = pd.DataFrame(price_data)
+                # Получаем текущие индексы и рассчитываем дефляторы
+                current_indices = st.session_state.price_indices_temp.copy()
+                deflators = {}
+                for year in st.session_state.project_data.years:
+                    deflators[year] = calculate_deflator(year, st.session_state.base_year, current_indices)
 
-                # Редактируемая таблица (КАК В ОБЪЕМАХ)
-                edited_df = st.data_editor(
-                    df,
-                    key=f"price_editor_{base_year}",
-                    num_rows="fixed",
-                    column_config={
-                        'Год': st.column_config.NumberColumn(disabled=True),
-                        'Ценовой индекс': st.column_config.NumberColumn(
-                            format="%.3f",
-                            min_value=0.0,
-                            max_value=10.0,
-                            step=0.001
-                        )
-                    }
-                )
+                # СОХРАНЯЕМ ЦЕНЫ ДЛЯ КАЖДОГО ПРОДУКТА И ГОДА В project_data
+                # Это важно для последующих расчетов выручки
+                st.session_state.project_data.prices = {}  # Очищаем старые цены
+                st.session_state.project_data.product_prices = {}  # Новая структура для хранения цен по продуктам
 
-                # СОХРАНЯЕМ ДАННЫЕ (КАК В ОБЪЕМАХ)
-                for _, row in edited_df.iterrows():
-                    year = int(row['Год'])
-                    index = float(row['Ценовой индекс'])
-                    st.session_state.project_data.prices[f"index_{year}"] = index
-                    st.session_state.project_data.prices[year] = base_price * index
+                # Создаем таблицу для отображения всех цен
+                all_prices_data = []
 
-                # НИКАКОЙ ДОПОЛНИТЕЛЬНОЙ ТАБЛИЦЫ!
-                # В блоках с объемами НЕТ второго st.dataframe после редактирования!
+                for product_type, base_price in st.session_state.product_base_prices.items():
+                    st.session_state.project_data.product_prices[product_type] = {}
 
-            # Дефляторы - только после того, как данные уже сохранены
-            if st.session_state.project_data.years and st.session_state.project_data.prices:
-                # Проверяем, есть ли у нас сохраненные индексы
-                has_indices = any(f"index_{year}" in st.session_state.project_data.prices for year in
-                                  st.session_state.project_data.years)
-
-                if has_indices:
-                    st.subheader("📉 Дефляторы по годам")
-
-                    # Получаем индексы
-                    price_indexes = {}
                     for year in st.session_state.project_data.years:
-                        price_indexes[year] = st.session_state.project_data.prices.get(f"index_{year}", 1.0)
+                        # Цена с учетом дефлятора
+                        calculated_price = base_price * deflators[year]
+                        st.session_state.project_data.product_prices[product_type][year] = calculated_price
 
-                    # Функция расчета дефлятора
-                    def calculate_deflator(year, base_year, price_indexes):
-                        if year == base_year:
-                            return 1.0
-                        if year > base_year:
-                            result = 1.0
-                            for k in range(base_year + 1, year + 1):
-                                result *= price_indexes.get(k, 1.0)
-                            return result
-                        else:
-                            result = 1.0
-                            for k in range(year + 1, base_year + 1):
-                                result *= price_indexes.get(k, 1.0)
-                            return 1.0 / result if result != 0 else 1.0
+                        # Сохраняем также в общий словарь для обратной совместимости
+                        # Используем составной ключ "продукт_год"
+                        st.session_state.project_data.prices[f"{product_type}_{year}"] = calculated_price
 
-                    # Рассчитываем дефляторы
-                    deflators = {}
-                    for year in st.session_state.project_data.years:
-                        deflators[year] = calculate_deflator(year, base_year, price_indexes)
-
-                    # Показываем результаты (ТОЛЬКО ДЛЯ ПРОСМОТРА, без редактирования)
-                    results_data = []
-                    for year in st.session_state.project_data.years:
-                        results_data.append({
+                        # Добавляем в данные для таблицы
+                        all_prices_data.append({
+                            'Продукт': product_type,
                             'Год': year,
-                            'Цена (руб.)': st.session_state.project_data.prices.get(year, 0),
-                            'Индекс': price_indexes.get(year, 1.0),
-                            'Дефлятор': deflators[year]
+                            'Базовая цена': base_price,
+                            'Дефлятор': deflators[year],
+                            'Цена с учетом дефлятора (руб.)': calculated_price
                         })
 
-                    results_df = pd.DataFrame(results_data)
+                # Создаем и отображаем сводную таблицу
+                df_prices = pd.DataFrame(all_prices_data)
+
+                # Сводная таблица для лучшего отображения
+                pivot_prices = df_prices.pivot_table(
+                    index='Продукт',
+                    columns='Год',
+                    values='Цена с учетом дефлятора (руб.)',
+                    fill_value=0
+                )
+
+                st.write("**Цены по продуктам и годам (руб.):**")
+                st.dataframe(
+                    pivot_prices.style.format("{:,.2f}"),
+                    use_container_width=True
+                )
+
+                # Детальная таблица с дефляторами
+                with st.expander("📋 Детальная таблица с дефляторами"):
                     st.dataframe(
-                        results_df.style.format({
-                            'Цена (руб.)': '{:,.2f}',
-                            'Индекс': '{:.6f}',
-                            'Дефлятор': '{:.6f}'
+                        df_prices.style.format({
+                            'Базовая цена': '{:,.2f}',
+                            'Дефлятор': '{:.5f}',
+                            'Цена с учетом дефлятора (руб.)': '{:,.2f}'
                         }),
                         use_container_width=True,
                         hide_index=True
                     )
 
-                    # График
-                    fig = go.Figure()
-                    colors = ['#2E8B57' if deflators[y] >= 1 else '#FF6B6B' for y in
-                              st.session_state.project_data.years]
-                    fig.add_trace(go.Bar(
-                        x=list(st.session_state.project_data.years),
-                        y=list(deflators.values()),
-                        marker_color=colors,
-                        text=[f"{deflators[y]:.4f}" for y in st.session_state.project_data.years],
-                        textposition='outside'
-                    ))
-                    fig.add_hline(y=1, line_dash="dash", line_color="gray")
-                    fig.update_layout(title="Динамика дефляторов", xaxis_title="Год", yaxis_title="Дефлятор",
-                                      height=400)
-                    st.plotly_chart(fig, use_container_width=True)
+                # Информация о расчете
+                st.info(f"""
+                **Формула расчета:** Цена продукта в году Y = Базовая цена продукта × Дефлятор года Y
 
-                with st.expander("ℹ️ Что такое дефлятор?"):
-                    st.markdown(f"""
-                    **Дефлятор** - коэффициент изменения цен относительно базового года ({base_year}).
-
-                    - Дефлятор > 1 - цены выросли
-                    - Дефлятор = 1 - цены не изменились  
-                    - Дефлятор < 1 - цены снизились
-
-                    **Расчет:** цепное произведение ценовых индексов
-                    """)
+                **Дефлятор для {st.session_state.base_year} года = 1.00** (базовый год)
+                - Для годов > {st.session_state.base_year}: цены растут (дефлятор > 1)
+                - Для годов < {st.session_state.base_year}: цены снижаются (дефлятор < 1)
+                """)
         # Кнопка сохранения
         if st.button("💾 Сохранить все данные", type="primary"):
             try:
