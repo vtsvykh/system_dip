@@ -647,16 +647,15 @@ def main():
             if st.session_state[selection_key].get(product, False)
         ]
 
-
-
-
         st.divider()
 
         # ========== ВВОД ДАННЫХ ТОЛЬКО ДЛЯ ВЫБРАННЫХ ПРОДУКТОВ ==========
         st.subheader("📊 Ввод объемов и цен для выбранных продуктов")
 
-        # Определяем единицы измерения
-        measurement_units = {
+        # Выбор единиц измерения
+        st.subheader("📏 Настройка единиц измерения")
+
+        default_units = {
             "Продукция сельского, лесного и рыбного хозяйства": "тонн",
             "ДОБЫЧА ПОЛЕЗНЫХ ИСКОПАЕМЫХ": "тонн",
             "ОБРАБАТЫВАЮЩИЕ ПРОИЗВОДСТВА": "тонн",
@@ -666,7 +665,15 @@ def main():
             "ТРАНСПОРТ": "пассажиро-км",
             "УСЛУГИ": "услуг"
         }
-        unit = measurement_units.get(selected_sector, "ед.")
+
+        all_units = ["млн.тонн", "тонн", "кг", "литров", "м³", "м²", "кВт·ч", "шт", "пар", "комплектов",
+                     "пассажиро-км", "услуг", "ед.", "тыс. руб.", "млн. руб."]
+
+        unit_key = f"unit_{selected_okpd}"
+        if unit_key not in st.session_state:
+            st.session_state[unit_key] = default_units.get(selected_sector, "ед.")
+
+
         years_list = st.session_state.project_data.years
 
         # Словари для хранения данных
@@ -679,13 +686,49 @@ def main():
         for product_idx, product_type in enumerate(selected_products):
             st.markdown(f"### {product_idx + 1}. {product_type}")
 
-            col_price, col_vol = st.columns([1, 2])
+            # ========== ВЫБОР ЕДИНИЦ ИЗМЕРЕНИЯ ДЛЯ ЭТОГО ПРОДУКТА ==========
+            # Три колонки: единицы измерения, цена и объемы
+            col_unit, col_price, col_vol = st.columns([1, 1, 2])
+
+            # Все возможные единицы измерения
+            all_units = ["млн.тонн", "тонн", "кг", "литров", "м³", "м²", "кВт·ч", "шт", "пар", "комплектов",
+                         "пассажиро-км", "услуг", "ед.", "тыс. руб.", "млн. руб."]
+
+            # Ключ для хранения единицы измерения продукта
+            unit_key = f"unit_{selected_okpd}_{product_type}"
+
+            # Инициализация единицы измерения для продукта
+            if unit_key not in st.session_state:
+                # Определяем единицу по умолчанию в зависимости от отрасли
+                default_units = {
+                    "Продукция сельского, лесного и рыбного хозяйства": "тонн",
+                    "ДОБЫЧА ПОЛЕЗНЫХ ИСКОПАЕМЫХ": "тонн",
+                    "ОБРАБАТЫВАЮЩИЕ ПРОИЗВОДСТВА": "тонн",
+                    "ЭНЕРГЕТИКА": "кВт·ч",
+                    "СТРОИТЕЛЬСТВО": "м²",
+                    "ТОРГОВЛЯ": "шт",
+                    "ТРАНСПОРТ": "пассажиро-км",
+                    "УСЛУГИ": "услуг"
+                }
+                st.session_state[unit_key] = default_units.get(selected_sector, "ед.")
+
+            with col_unit:
+                # Выбор единицы измерения
+                product_unit = st.selectbox(
+                    "📏 Единица измерения",
+                    options=all_units,
+                    index=all_units.index(st.session_state[unit_key]) if st.session_state[unit_key] in all_units else 0,
+                    key=f"unit_select_{selected_okpd}_{product_type}",
+                    help=f"Выберите единицу измерения для {product_type}"
+                )
+                st.session_state[unit_key] = product_unit
 
             with col_price:
+                # Базовая цена продукта (с указанием единицы измерения)
                 price_key = f"price_{selected_okpd}_{product_type}"
                 default_price = st.session_state.get(price_key, 1000.0)
                 base_price = st.number_input(
-                    f"Базовая цена (руб.)",
+                    f"💰 Цена (руб.)",
                     value=default_price,
                     step=100.0,
                     key=price_key
@@ -693,8 +736,10 @@ def main():
                 product_base_prices[product_type] = base_price
 
             with col_vol:
-                st.write("**Объемы производства по годам**")
+                # Таблица объемов с выбранной единицей измерения
+                st.write(f"Объемы производства")
 
+                # Создаем данные для таблицы
                 volumes_data = []
                 for year in years_list:
                     volume_key = f"volume_{selected_okpd}_{product_type}_{year}"
@@ -705,20 +750,21 @@ def main():
 
                     volumes_data.append({
                         'Год': year,
-                        f'Объем ({unit})': default_volume,
+                        f'Объем ({product_unit})': default_volume,
                         'Доля экспорта (%)': default_export,
                         'Доля импорта (%)': 100.0 - default_export
                     })
 
                 df_volumes = pd.DataFrame(volumes_data)
 
+                # Редактируемая таблица
                 edited_df = st.data_editor(
                     df_volumes,
                     key=f"editor_{selected_okpd}_{product_type}",
                     num_rows="fixed",
                     column_config={
                         'Год': st.column_config.NumberColumn(disabled=True),
-                        f'Объем ({unit})': st.column_config.NumberColumn(
+                        f'Объем ({product_unit})': st.column_config.NumberColumn(
                             format="%.3f",
                             min_value=0.0,
                             step=0.001
@@ -736,13 +782,14 @@ def main():
                     }
                 )
 
+                # Обрабатываем данные
                 product_volumes[product_type] = {}
                 product_export_shares[product_type] = {}
                 product_import_shares[product_type] = {}
 
                 for _, row in edited_df.iterrows():
                     year = int(row['Год'])
-                    volume = float(row[f'Объем ({unit})'])
+                    volume = float(row[f'Объем ({product_unit})'])
                     export_pct = float(row['Доля экспорта (%)'])
                     export_pct = max(0.0, min(100.0, export_pct))
                     import_pct = 100.0 - export_pct
@@ -754,15 +801,15 @@ def main():
                     st.session_state[f"volume_{selected_okpd}_{product_type}_{year}"] = volume
                     st.session_state[f"export_{selected_okpd}_{product_type}_{year}"] = export_pct
 
-                total_volume = sum(product_volumes[product_type].values())
-                avg_export = sum(product_export_shares[product_type].values()) / len(
-                    years_list) * 100 if years_list else 0
+            # Показываем итоги с выбранной единицей измерения
+            total_volume = sum(product_volumes[product_type].values())
+            avg_export = sum(product_export_shares[product_type].values()) / len(years_list) * 100 if years_list else 0
 
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.metric(f"📦 Общий объем", f"{total_volume:,.3f} {unit}")
-                with col2:
-                    st.metric(f"📤 Средний экспорт", f"{avg_export:.1f}%")
+            col1, col2 = st.columns(2)
+            with col1:
+                st.metric(f"📦 Общий объем", f"{total_volume:,.3f} {product_unit}")
+            with col2:
+                st.metric(f"📤 Средний экспорт", f"{avg_export:.1f}%")
 
             st.divider()
 
