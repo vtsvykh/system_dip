@@ -1,166 +1,23 @@
-##
-import streamlit as st
-import pandas as pd
-import plotly.graph_objects as go
 import json
-import os
-import numpy as np
+from datetime import datetime
 from io import BytesIO
 
-# ========== УПРОЩЕННЫЕ МОДЕЛИ ДАННЫХ ==========
-class ProjectData:
-    """Хранилище всех данных проекта"""
+import numpy as np
+import pandas as pd
+import plotly.graph_objects as go
+import streamlit as st
 
-    def __init__(self):
-        self.years = []
-        self.volumes = {}
-        self.prices = {}
-        self.discount_rate = 0.10
-        self.tax_rate = 0.20
-        self.equipment_share = 0.60
-        self.equipment_depreciation = 0.15
-        self.construction_depreciation = 0.05
-        self.products = {}  # {product_type: {year: volume}}
-        self.export_shares = {}
-        self.import_shares = {}
-        self.sector = ""  # Выбранная отрасль
-        self.okpd_code = ""  # Выбранный код ОКПД2
-        self.price_indices = {}
-
-    def to_dict(self):
-        return {
-            'years': self.years,
-            'volumes': self.volumes,
-            'prices': self.prices,
-            'discount_rate': self.discount_rate,
-            'tax_rate': self.tax_rate,
-            'equipment_share': self.equipment_share,
-            'equipment_depreciation': self.equipment_depreciation,
-            'construction_depreciation': self.construction_depreciation,
-            'products': self.products,
-            'export_shares': self.export_shares,
-            'import_shares': self.import_shares,
-            'sector': self.sector,
-            'okpd_code': self.okpd_code,
-            'price_indices': self.price_indices
-        }
-
-    @classmethod
-    def from_dict(cls, data):
-        obj = cls()
-        obj.__dict__.update(data)
-        return obj
-
-
-# ========== ФИНАНСОВЫЕ РАСЧЕТЫ ==========
-def calculate_npv(cash_flows, discount_rate):
-    """Расчет чистой приведенной стоимости"""
-    npv = 0
-    years = sorted(cash_flows.keys())
-    for i, year in enumerate(years):
-        npv += cash_flows[year] / ((1 + discount_rate) ** i)
-    return npv
-
-
-def calculate_irr(cash_flows, max_iterations=100):
-    """Расчет внутренней нормы доходности"""
-    def npv(rate):
-        return calculate_npv(cash_flows, rate)
-
-    low, high = -0.5, 1.0
-    for _ in range(max_iterations):
-        mid = (low + high) / 2
-        if npv(mid) > 0:
-            low = mid
-        else:
-            high = mid
-        if abs(high - low) < 0.0001:
-            return mid
-    return (low + high) / 2
-
-
-def calculate_payback_period(cash_flows, initial_investment):
-    """Расчет срока окупаемости"""
-    cumulative = 0
-    years = sorted(cash_flows.keys())
-
-    for i, year in enumerate(years):
-        cumulative += cash_flows[year]
-        if cumulative >= initial_investment:
-            if i == 0:
-                return 1
-            prev_cumulative = cumulative - cash_flows[year]
-            return i + (initial_investment - prev_cumulative) / cash_flows[year]
-    return float('inf')
-
-
-def calculate_revenue(volumes_by_product, prices, export_shares, import_shares, years):
-    """Расчет выручки"""
-    results = {
-        'total_revenue': {year: 0 for year in years},
-        'export_revenue': {year: 0 for year in years},
-        'domestic_revenue': {year: 0 for year in years},
-        'export_volume': {year: 0 for year in years},
-        'domestic_volume': {year: 0 for year in years}
-    }
-
-    for product in volumes_by_product:
-        for year in years:
-            volume = volumes_by_product[product].get(year, 0)
-            price = prices.get(year, 0)
-            export_share = export_shares.get(product, {}).get(year, 0)
-            import_share = import_shares.get(product, {}).get(year, 0)
-
-            export_vol = volume * export_share
-            domestic_vol = volume * import_share
-
-            results['export_volume'][year] += export_vol
-            results['domestic_volume'][year] += domestic_vol
-            results['export_revenue'][year] += export_vol * price
-            results['domestic_revenue'][year] += domestic_vol * price * 1.2
-            results['total_revenue'][year] += volume * price
-
-    return results
-
-
-def create_excel_report(project_data, revenue_data, cash_flows, npv, irr, payback):
-    """Создание Excel отчета"""
-    output = BytesIO()
-
-    with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        params = pd.DataFrame([
-            ['Ставка дисконтирования', f"{project_data.discount_rate * 100:.1f}%"],
-            ['Ставка налога', f"{project_data.tax_rate * 100:.1f}%"],
-            ['Доля оборудования', f"{project_data.equipment_share * 100:.1f}%"],
-            ['Амортизация оборудования', f"{project_data.equipment_depreciation * 100:.1f}%"],
-            ['Амортизация СМР', f"{project_data.construction_depreciation * 100:.1f}%"],
-            ['Отрасль', project_data.sector],
-            ['Код ОКПД2', project_data.okpd_code]
-        ], columns=['Параметр', 'Значение'])
-        params.to_excel(writer, sheet_name='Параметры', index=False)
-
-        if revenue_data:
-            revenue_df = pd.DataFrame([{
-                'Год': year,
-                'Экспорт': revenue_data['export_revenue'][year],
-                'Внутренний рынок': revenue_data['domestic_revenue'][year],
-                'Всего': revenue_data['total_revenue'][year]
-            } for year in project_data.years])
-            revenue_df.to_excel(writer, sheet_name='Выручка', index=False)
-
-        if cash_flows:
-            cf_df = pd.DataFrame([{'Год': year, 'Денежный поток': cash_flows[year]}
-                                  for year in sorted(cash_flows.keys())])
-            cf_df.to_excel(writer, sheet_name='Денежные потоки', index=False)
-
-        metrics = pd.DataFrame([
-            ['NPV', f"{npv:,.0f} руб."],
-            ['IRR', f"{irr * 100:.1f}%"],
-            ['Срок окупаемости', f"{payback:.1f} лет" if payback != float('inf') else "Не окупается"]
-        ], columns=['Показатель', 'Значение'])
-        metrics.to_excel(writer, sheet_name='Итоговые показатели', index=False)
-
-    return output.getvalue()
+from data.okpd_catalog import ALL_UNITS, DEFAULT_UNITS, OKPD_CATALOG
+from data.product_types import PRODUCT_TYPES_MAPPING
+from models.project_data import ProjectData
+from utils.calculations import (
+    calculate_deflator,
+    calculate_irr,
+    calculate_npv,
+    calculate_payback_period,
+    calculate_revenue,
+)
+from utils.excel_export import create_excel_report
 
 
 # ========== ОСНОВНОЕ ПРИЛОЖЕНИЕ ==========
@@ -187,12 +44,13 @@ def main():
         st.session_state.custom_products = []  # Список добавленных пользователем продуктов
     if 'custom_products_by_okpd' not in st.session_state:
         st.session_state.custom_products_by_okpd = {}  # Пользовательские продукты по ОКПД
+    if 'product_base_prices' not in st.session_state:
+        st.session_state.product_base_prices = {}
 
     # ========== САЙДБАР ДЛЯ ЗАГРУЗКИ ФАЙЛОВ ==========
     with st.sidebar:
         st.header("📁 Загрузка отчетности")
 
-        from datetime import datetime
         current_year = datetime.now().year
 
         # Получаем текущие годы из project_data если они есть
@@ -282,6 +140,7 @@ def main():
                 if key in st.session_state:
                     del st.session_state[key]
             st.rerun()
+
     # Вкладки
     tab_input, tab_revenue, tab_results, tab_export = st.tabs([
         "📝 Ввод данных", "💰 Выручка и продажи", "📈 Анализ эффективности", "💾 Экспорт"
@@ -378,151 +237,8 @@ def main():
         # ========== БЛОК 4: ВЫБОР ПРОДУКЦИИ И ОБЪЕМОВ ==========
         st.subheader("📦 Выбор продукции и объемов")
 
-        # УНИВЕРСАЛЬНЫЙ справочник ОКПД2 для всех отраслей
-        okpd_catalog = {
-            "Продукция сельского, лесного и рыбного хозяйства": {
-                "01.11": "Культуры зерновые (кроме риса), зернобобовые, семена масличных культур",
-                "01.12": "Выращивание овощей",
-                "01.13": "Выращивание фруктов и ягод",
-                "01.21": "Разведение крупного рогатого скота",
-                "01.22": "Разведение свиней",
-                "01.23": "Разведение птицы",
-                "01.24": "Разведение овец и коз"
-            },
-            "ДОБЫЧА ПОЛЕЗНЫХ ИСКОПАЕМЫХ": {
-                "05.10": "Добыча угля",
-                "06.10": "Добыча нефти",
-                "06.20": "Добыча природного газа",
-                "07.10": "Добыча железных руд",
-                "07.21": "Добыча руд цветных металлов",
-                "08.11": "Добыча строительного камня"
-            },
-            "ОБРАБАТЫВАЮЩИЕ ПРОИЗВОДСТВА": {
-                "10.11": "Производство мяса",
-                "10.12": "Производство молочных продуктов",
-                "10.13": "Производство продуктов мукомольной промышленности",
-                "10.51": "Производство молочных продуктов",
-                "10.71": "Производство хлеба и мучных кондитерских изделий",
-                "11.01": "Производство алкогольных напитков",
-                "13.10": "Производство текстильных изделий",
-                "13.20": "Производство одежды",
-                "14.11": "Производство кожаной одежды",
-                "16.10": "Производство пиломатериалов",
-                "17.11": "Производство целлюлозы",
-                "17.12": "Производство бумаги и картона",
-                "20.11": "Производство промышленных газов",
-                "20.12": "Производство красителей и пигментов",
-                "20.13": "Производство основных органических химических веществ",
-                "20.14": "Производство основных неорганических химических веществ",
-                "20.15": "Производство удобрений и азотных соединений",
-                "20.16": "Производство пластмасс в первичных формах",
-                "20.17": "Производство синтетического каучука",
-                "21.10": "Производство фармацевтической продукции",
-                "22.11": "Производство шин и покрышек",
-                "22.19": "Производство прочих резиновых изделий",
-                "23.11": "Производство листового стекла",
-                "23.12": "Производство стеклянной тары",
-                "23.13": "Производство стекловолокна",
-                "23.14": "Производство бытовых стеклянных изделий",
-                "23.31": "Производство керамических плиток",
-                "23.32": "Производство кирпича и черепицы",
-                "23.41": "Производство цемента",
-                "23.42": "Производство извести и гипса",
-                "23.43": "Производство готовых бетонных изделий",
-                "24.10": "Производство чугуна, стали и ферросплавов",
-                "24.20": "Производство стальных труб",
-                "24.31": "Производство стального проката",
-                "24.32": "Производство стальных профилей",
-                "24.33": "Производство стальной арматуры",
-                "24.34": "Производство стальных проволок и канатов",
-                "24.41": "Производство благородных металлов",
-                "24.42": "Производство алюминия",
-                "24.43": "Производство свинца, цинка и олова",
-                "24.44": "Производство меди",
-                "24.45": "Производство прочих цветных металлов",
-                "25.11": "Производство металлических конструкций",
-                "25.12": "Производство строительных металлических изделий",
-                "25.21": "Производство радиаторов и котлов",
-                "25.29": "Производство прочих металлических емкостей",
-                "25.30": "Производство паровых котлов",
-                "26.11": "Производство электронных компонентов",
-                "26.20": "Производство компьютеров",
-                "26.30": "Производство коммуникационного оборудования",
-                "26.40": "Производство бытовой электроники",
-                "27.11": "Производство электродвигателей",
-                "27.12": "Производство трансформаторов",
-                "27.13": "Производство распределительных устройств",
-                "27.20": "Производство батарей и аккумуляторов",
-                "27.31": "Производство кабелей и проводов",
-                "27.32": "Производство электроосветительного оборудования",
-                "28.11": "Производство двигателей и турбин",
-                "28.12": "Производство насосов и компрессоров",
-                "28.13": "Производство арматуры и кранов",
-                "28.14": "Производство подшипников",
-                "28.15": "Производство редукторов и зубчатых передач",
-                "28.21": "Производство печей и горелок",
-                "28.22": "Производство подъемно-транспортного оборудования",
-                "28.23": "Производство офисной техники",
-                "28.24": "Производство ручных инструментов",
-                "28.25": "Производство промышленного холодильного оборудования",
-                "29.10": "Производство автомобилей",
-                "29.20": "Производство кузовов для автомобилей",
-                "29.31": "Производство электрического и электронного оборудования для автомобилей",
-                "30.11": "Производство судов",
-                "30.12": "Производство прогулочных и спортивных судов",
-                "30.20": "Производство железнодорожного подвижного состава",
-                "30.30": "Производство летательных аппаратов",
-                "30.40": "Производство военной боевой техники",
-                "30.91": "Производство мотоциклов",
-                "30.92": "Производство велосипедов",
-                "31.01": "Производство мебели для офисов",
-                "31.02": "Производство кухонной мебели",
-                "31.03": "Производство матрасов",
-                "32.11": "Производство монет",
-                "32.12": "Производство ювелирных изделий",
-                "32.13": "Производство бижутерии"
-            },
-            "ЭНЕРГЕТИКА": {
-                "35.11": "Производство электроэнергии",
-                "35.12": "Передача электроэнергии",
-                "35.13": "Распределение электроэнергии",
-                "35.14": "Торговля электроэнергией",
-                "35.21": "Производство газообразного топлива",
-                "35.22": "Распределение газообразного топлива",
-                "35.23": "Торговля газообразным топливом"
-            },
-            "СТРОИТЕЛЬСТВО": {
-                "41.10": "Разработка строительных проектов",
-                "41.20": "Строительство жилых зданий",
-                "42.11": "Строительство автомобильных дорог",
-                "42.12": "Строительство железных дорог",
-                "42.13": "Строительство мостов и тоннелей",
-                "43.11": "Разборка и снос зданий",
-                "43.12": "Подготовка строительной площадки"
-            },
-            "ТОРГОВЛЯ": {
-                "45.11": "Торговля легковыми автомобилями",
-                "45.19": "Торговля прочими автотранспортными средствами",
-                "46.11": "Торговля через агентов",
-                "47.11": "Торговля в неспециализированных магазинах"
-            },
-            "ТРАНСПОРТ": {
-                "49.10": "Деятельность железнодорожного транспорта",
-                "49.20": "Деятельность грузового автомобильного транспорта",
-                "49.31": "Деятельность городского пассажирского транспорта",
-                "50.10": "Деятельность морского пассажирского транспорта",
-                "51.10": "Деятельность воздушного пассажирского транспорта"
-            },
-            "УСЛУГИ": {
-                "55.10": "Деятельность гостиниц",
-                "56.10": "Деятельность ресторанов",
-                "58.11": "Издание книг",
-                "58.13": "Издание газет",
-                "59.11": "Производство кинофильмов",
-                "60.10": "Деятельность в области радиовещания",
-                "61.10": "Деятельность в области связи"
-            }
-        }
+        # Справочник ОКПД2 импортируется из data/okpd_catalog.py
+        okpd_catalog = OKPD_CATALOG
 
         # Выбор отрасли
         selected_sector = st.selectbox(
@@ -541,37 +257,8 @@ def main():
                 help="Выберите код ОКПД2 для вашего типа продукции"
             )
 
-
-        # УНИВЕРСАЛЬНЫЙ справочник типов продукции для всех ОКПД
-        product_types_mapping = {
-            "01.11": ["Пшеница", "Ячмень, рожь и овес", "Овес", "Кукуруза", "Сорго, просо и прочие зерновые культуры"],
-            "01.12": ["Картофель", "Морковь", "Капуста", "Лук", "Томаты", "Огурцы"],
-            "01.13": ["Яблоки", "Груши", "Вишня", "Слива", "Смородина", "Малина"],
-            "01.21": ["Говядина", "Молоко", "Мясо КРС"],
-            "01.22": ["Свинина", "Мясо свиней"],
-            "01.23": ["Куриное мясо", "Яйца", "Мясо индейки"],
-            "05.10": ["Каменный уголь", "Бурый уголь"],
-            "06.10": ["Сырая нефть", "Газовый конденсат"],
-            "06.20": ["Природный газ"],
-            "07.10": ["Железная руда", "Железорудный концентрат"],
-            "24.10": ["Чугун передельный", "Чугун литейный", "Сталь углеродистая", "Сталь легированная"],
-            "24.20": ["Трубы бесшовные", "Трубы сварные", "Трубы профильные"],
-            "24.31": ["Прокат листовой", "Прокат сортовой", "Прокат фасонный"],
-            "24.41": ["Золото", "Серебро", "Платина"],
-            "24.42": ["Алюминий первичный", "Алюминиевые сплавы"],
-            "20.13": ["Этилен", "Пропилен", "Бензол", "Метанол"],
-            "20.15": ["Азотные удобрения", "Фосфорные удобрения", "Калийные удобрения"],
-            "20.16": ["Полиэтилен", "Полипропилен", "ПВХ", "Полистирол"],
-            "28.11": ["Дизельные двигатели", "Газовые турбины", "Паровые турбины"],
-            "29.10": ["Легковые автомобили", "Грузовые автомобили", "Автобусы"],
-            "10.11": ["Говядина", "Свинина", "Баранина", "Мясо птицы"],
-            "10.12": ["Молоко", "Сыр", "Йогурт", "Сливочное масло", "Творог"],
-            "10.71": ["Хлеб", "Булочки", "Пироги", "Печенье"],
-            "16.10": ["Пиломатериалы хвойные", "Пиломатериалы лиственные", "Древесные плиты"],
-            "35.11": ["Электроэнергия"],
-            "35.21": ["Природный газ", "Сжиженный газ"],
-            "default": ["Основная продукция", "Побочная продукция", "Полуфабрикаты"]
-        }
+        # Справочник типов продукции импортируется из data/product_types.py
+        product_types_mapping = PRODUCT_TYPES_MAPPING
 
         # Получаем ВСЕ возможные типы продукции для выбранного ОКПД
         default_product_types = product_types_mapping.get(selected_okpd, product_types_mapping["default"]).copy()
@@ -640,8 +327,6 @@ def main():
                                 del st.session_state[selection_key][product]
                             st.rerun()
 
-
-
         # Получаем список ТОЛЬКО выбранных продуктов
         selected_products = [
             product for product in all_product_types
@@ -656,24 +341,15 @@ def main():
         # Выбор единиц измерения
         st.subheader("📏 Настройка единиц измерения")
 
-        default_units = {
-            "Продукция сельского, лесного и рыбного хозяйства": "тонн",
-            "ДОБЫЧА ПОЛЕЗНЫХ ИСКОПАЕМЫХ": "тонн",
-            "ОБРАБАТЫВАЮЩИЕ ПРОИЗВОДСТВА": "тонн",
-            "ЭНЕРГЕТИКА": "кВт·ч",
-            "СТРОИТЕЛЬСТВО": "м²",
-            "ТОРГОВЛЯ": "шт",
-            "ТРАНСПОРТ": "пассажиро-км",
-            "УСЛУГИ": "услуг"
-        }
+        # Единицы по умолчанию импортируются из data/okpd_catalog.py
+        default_units = DEFAULT_UNITS
 
-        all_units = ["млн.тонн", "тонн", "кг", "литров", "м³", "м²", "кВт·ч", "шт", "пар", "комплектов",
-                     "пассажиро-км", "услуг", "ед.", "тыс. руб.", "млн. руб."]
+        # Все возможные единицы измерения импортируются из data/okpd_catalog.py
+        all_units = list(ALL_UNITS)
 
         unit_key = f"unit_{selected_okpd}"
         if unit_key not in st.session_state:
             st.session_state[unit_key] = default_units.get(selected_sector, "ед.")
-
 
         years_list = st.session_state.project_data.years
 
@@ -692,8 +368,7 @@ def main():
             col_unit, col_price, col_vol = st.columns([1, 1, 2])
 
             # Все возможные единицы измерения
-            all_units = ["млн.тонн", "тонн", "кг", "литров", "м³", "м²", "кВт·ч", "шт", "пар", "комплектов",
-                         "пассажиро-км", "услуг", "ед.", "тыс. руб.", "млн. руб."]
+            all_units = list(ALL_UNITS)
 
             # Ключ для хранения единицы измерения продукта
             unit_key = f"unit_{selected_okpd}_{product_type}"
@@ -701,17 +376,7 @@ def main():
             # Инициализация единицы измерения для продукта
             if unit_key not in st.session_state:
                 # Определяем единицу по умолчанию в зависимости от отрасли
-                default_units = {
-                    "Продукция сельского, лесного и рыбного хозяйства": "тонн",
-                    "ДОБЫЧА ПОЛЕЗНЫХ ИСКОПАЕМЫХ": "тонн",
-                    "ОБРАБАТЫВАЮЩИЕ ПРОИЗВОДСТВА": "тонн",
-                    "ЭНЕРГЕТИКА": "кВт·ч",
-                    "СТРОИТЕЛЬСТВО": "м²",
-                    "ТОРГОВЛЯ": "шт",
-                    "ТРАНСПОРТ": "пассажиро-км",
-                    "УСЛУГИ": "услуг"
-                }
-                st.session_state[unit_key] = default_units.get(selected_sector, "ед.")
+                st.session_state[unit_key] = DEFAULT_UNITS.get(selected_sector, "ед.")
 
             with col_unit:
                 # Выбор единицы измерения
@@ -735,90 +400,87 @@ def main():
                     key=price_key
                 )
                 product_base_prices[product_type] = base_price
+                st.session_state.product_base_prices = product_base_prices
 
             with col_vol:
                 # Таблица объемов с выбранной единицей измерения
                 st.write(f"Объемы производства")
 
-                # Создаем данные для таблицы
+                # Инициализация хранилищ объёмов/экспорта (один раз) — аналог price_indices_temp
+                if 'volumes_temp' not in st.session_state:
+                    st.session_state.volumes_temp = {}
+                if 'exports_temp' not in st.session_state:
+                    st.session_state.exports_temp = {}
+
+                vol_store = st.session_state.volumes_temp.setdefault(selected_okpd, {}).setdefault(product_type, {})
+                exp_store = st.session_state.exports_temp.setdefault(selected_okpd, {}).setdefault(product_type, {})
+
+                # Строим DataFrame только из vol_store / exp_store, БЕЗ вычисляемой колонки импорта
                 volumes_data = []
                 for year in years_list:
-                    volume_key = f"volume_{selected_okpd}_{product_type}_{year}"
-                    export_key = f"export_{selected_okpd}_{product_type}_{year}"
-
-                    default_volume = st.session_state.get(volume_key, 0.0)
-                    default_export = st.session_state.get(export_key, 0.0)
-
+                    default_volume = vol_store.get(year, 0.0)
+                    default_export = exp_store.get(year, 0.0)
                     volumes_data.append({
                         'Год': year,
                         f'Объем ({product_unit})': default_volume,
                         'Доля экспорта (%)': default_export,
-                        'Доля импорта (%)': 100.0 - default_export
+                        'Доля импорта (%)': 100.0 - default_export,
                     })
 
                 df_volumes = pd.DataFrame(volumes_data)
 
-                # Редактируемая таблица
+                # Стабильный ключ редактора (зависит только от продукта и набора лет)
+                editor_key = f"vol_editor_{selected_okpd}_{product_type}_{hash(tuple(years_list))}"
+
                 edited_df = st.data_editor(
                     df_volumes,
-                    key=f"editor_{selected_okpd}_{product_type}",
+                    key=editor_key,
                     num_rows="fixed",
                     column_config={
                         'Год': st.column_config.NumberColumn(disabled=True),
                         f'Объем ({product_unit})': st.column_config.NumberColumn(
-                            format="%.3f",
-                            min_value=0.0,
-                            step=0.001
+                            format="%.3f", min_value=0.0, step=0.001
                         ),
                         'Доля экспорта (%)': st.column_config.NumberColumn(
+                            format="%.1f", min_value=0.0, max_value=100.0, step=0.1
+                        ),
+                        'Доля импорта (%)': st.column_config.NumberColumn(
                             format="%.1f",
                             min_value=0.0,
                             max_value=100.0,
-                            step=0.1
+                            step=0.1,
                         ),
-                        'Доля импорта (%)': st.column_config.NumberColumn(
-                            disabled=True,
-                            format="%.1f"
-                        )
                     }
                 )
 
-                # Обрабатываем данные
                 product_volumes[product_type] = {}
                 product_export_shares[product_type] = {}
                 product_import_shares[product_type] = {}
 
+                need_update = False
                 for _, row in edited_df.iterrows():
                     year = int(row['Год'])
                     volume = float(row[f'Объем ({product_unit})'])
                     export_pct = float(row['Доля экспорта (%)'])
                     export_pct = max(0.0, min(100.0, export_pct))
+                    # Колонку «Доля импорта (%)» из таблицы НЕ читаем —
+                    # она всегда производная от export_pct.
                     import_pct = 100.0 - export_pct
+
+                    old_volume = vol_store.get(year, 0.0)
+                    old_export = exp_store.get(year, 0.0)
+
+                    if abs(old_volume - volume) > 1e-9 or abs(old_export - export_pct) > 1e-9:
+                        need_update = True
+                        vol_store[year] = volume
+                        exp_store[year] = export_pct
 
                     product_volumes[product_type][year] = volume
                     product_export_shares[product_type][year] = export_pct / 100
                     product_import_shares[product_type][year] = import_pct / 100
 
-                    st.session_state[f"volume_{selected_okpd}_{product_type}_{year}"] = volume
-                    st.session_state[f"export_{selected_okpd}_{product_type}_{year}"] = export_pct
-
-            # Показываем итоги с выбранной единицей измерения
-            total_volume = sum(product_volumes[product_type].values())
-            avg_export = sum(product_export_shares[product_type].values()) / len(years_list) * 100 if years_list else 0
-
-            col1, col2 = st.columns(2)
-            with col1:
-                st.metric(f"📦 Общий объем", f"{total_volume:,.3f} {product_unit}")
-            with col2:
-                st.metric(f"📤 Средний экспорт", f"{avg_export:.1f}%")
-
-            st.divider()
-
-        # Сохраняем в session_state
-        st.session_state.product_volumes = product_volumes
-        st.session_state.product_export_shares = product_export_shares
-        st.session_state.product_import_shares = product_import_shares
-        st.session_state.product_base_prices = product_base_prices
+                if need_update:
+                    st.rerun()
 
         # ========== БЛОК 5: ЦЕНЫ (общие индексы и дефляторы) ==========
         st.subheader("💰 Ценовые индексы и дефляторы")
@@ -899,25 +561,11 @@ def main():
                 st.rerun()
 
             # ========== РАСЧЕТ ЦЕН ПО ПРОДУКТАМ И ГОДАМ ==========
-            if st.session_state.price_indices_temp and hasattr(st.session_state, 'product_base_prices'):
+            if st.session_state.price_indices_temp and st.session_state.get('product_base_prices'):
                 st.subheader("📊 Расчет цен по продуктам и годам")
 
-                # Функция расчета дефлятора
-                def calculate_deflator(year, base_year, price_indices):
-                    if year == base_year:
-                        return 1.0
-                    if year > base_year:
-                        result = 1.0
-                        for y in range(base_year + 1, year + 1):
-                            result *= price_indices.get(y, 1.0)
-                        return result
-                    else:
-                        result = 1.0
-                        for y in range(year + 1, base_year + 1):
-                            result *= price_indices.get(y, 1.0)
-                        return 1.0 / result if result != 0 else 1.0
-
                 # Получаем текущие индексы и рассчитываем дефляторы
+                # (функция calculate_deflator импортируется из utils.calculations)
                 current_indices = st.session_state.price_indices_temp.copy()
                 deflators = {}
                 for year in st.session_state.project_data.years:
@@ -949,7 +597,6 @@ def main():
                             'Год': year,
                             'Базовая цена': base_price,
                             'Дефлятор': deflators[year],
-                            'Цена с учетом дефлятора (руб.)': calculated_price
                         })
 
                 # Создаем и отображаем сводную таблицу
@@ -959,7 +606,6 @@ def main():
                 pivot_prices = df_prices.pivot_table(
                     index='Продукт',
                     columns='Год',
-                    values='Цена с учетом дефлятора (руб.)',
                     fill_value=0
                 )
 
@@ -975,20 +621,13 @@ def main():
                         df_prices.style.format({
                             'Базовая цена': '{:,.2f}',
                             'Дефлятор': '{:.5f}',
-                            'Цена с учетом дефлятора (руб.)': '{:,.2f}'
                         }),
                         use_container_width=True,
                         hide_index=True
                     )
 
-                # Информация о расчете
-                st.info(f"""
-                **Формула расчета:** Цена продукта в году Y = Базовая цена продукта × Дефлятор года Y
 
-                **Дефлятор для {st.session_state.base_year} года = 1.00** (базовый год)
-                - Для годов > {st.session_state.base_year}: цены растут (дефлятор > 1)
-                - Для годов < {st.session_state.base_year}: цены снижаются (дефлятор < 1)
-                """)
+
         # Кнопка сохранения
         if st.button("💾 Сохранить все данные", type="primary"):
             try:
