@@ -19,6 +19,212 @@ from utils.calculations import (
 )
 from utils.excel_export import create_excel_report
 
+def read_uploaded_excel(uploaded_file):
+    """Чтение Excel-файла и базовая очистка таблицы"""
+    if uploaded_file is None:
+        return None
+
+    try:
+        df = pd.read_excel(uploaded_file, header=None)
+        df = df.dropna(how="all").dropna(axis=1, how="all")
+        df = df.reset_index(drop=True)
+        df.columns = [f"Колонка {i+1}" for i in range(df.shape[1])]
+        return df
+    except Exception as e:
+        st.error(f"Ошибка чтения файла {uploaded_file.name}: {e}")
+        return None
+
+def normalize_year(value):
+    """Преобразование заголовка года к целому числу"""
+    try:
+        if pd.isna(value):
+            return None
+        value_str = str(value).strip()
+
+        if value_str.startswith("31.12."):
+            tail = value_str.split(".")[-1]
+            year = int(tail)
+            return 2000 + year if year < 100 else year
+
+        year_float = float(value_str)
+        year_int = int(year_float)
+        if 1900 <= year_int <= 2100:
+            return year_int
+    except:
+        return None
+
+    return None
+
+
+def extract_row_by_code(df, code):
+    """Извлекает значения по строке отчетности (например, 2110 или 4112)"""
+    if df is None or df.empty:
+        return {}
+
+    result = {}
+
+    for i in range(len(df)):
+        row_code = df.iloc[i, 1] if df.shape[1] > 1 else None
+        try:
+            if pd.notna(row_code) and int(float(row_code)) == int(code):
+                for j in range(2, df.shape[1]):
+                    year = normalize_year(df.iloc[1, j]) if len(df) > 1 else None
+                    if year is not None:
+                        value = df.iloc[i, j]
+                        if pd.isna(value):
+                            value = 0.0
+                        result[year] = float(value)
+                break
+        except:
+            continue
+
+    return result
+
+def build_sales_matrix(project_data, years, deflators, vat_rates,
+                       other_operating_receipts, liquidation_by_year,
+                       revenue_without_vat_report, product_base_prices):
+    rows = []
+
+    total_other_revenue = {year: 0.0 for year in years}
+    total_receipts = {year: other_operating_receipts.get(year, 0.0) for year in years}
+    total_liquidation = {year: liquidation_by_year.get(year, 0.0) for year in years}
+    total_revenue_with_vat = {year: 0.0 for year in years}
+    total_revenue_without_vat = {year: 0.0 for year in years}
+    total_accrued_vat = {year: 0.0 for year in years}
+
+    for product_name, product_years in project_data.products.items():
+        row_product_name = {"Наименование статьи": product_name}
+        row_price_total = {"Наименование статьи": "Цена"}
+        row_volume_total = {"Наименование статьи": "Объем"}
+        row_revenue_total = {"Наименование статьи": "Выручка от реализации"}
+
+        row_domestic_header = {"Наименование статьи": "В т.ч. продажи на внутренний рынок"}
+        row_domestic_price = {"Наименование статьи": "Цена"}
+        row_domestic_volume = {"Наименование статьи": "Объем импорта"}
+        row_domestic_revenue = {"Наименование статьи": "Выручка с НДС"}
+
+        row_export_header = {"Наименование статьи": "Продажи на экспорт"}
+        row_export_price = {"Наименование статьи": "Цена"}
+        row_export_volume = {"Наименование статьи": "Объем экспорта"}
+        row_export_revenue = {"Наименование статьи": "Выручка без НДС"}
+
+
+        for year in years:
+            volume = project_data.products.get(product_name, {}).get(year, 0.0)
+            export_share = project_data.export_shares.get(product_name, {}).get(year, 0.0)
+            export_volume = volume * export_share
+            import_volume = volume - export_volume
+
+
+            vat_rate = vat_rates.get(year, 0.20)
+            deflator = deflators.get(year, 1.0)
+            # Сначала пробуем взять фиксированную цену по году
+            fixed = st.session_state.get("fixed_product_prices", {})
+            if product_name in fixed and year in fixed[product_name]:
+                price_wo_vat = fixed[product_name][year]
+            else:
+                input_price = product_base_prices.get(product_name, 0.0)
+                price_wo_vat = input_price / deflator if deflator not in (0, None) else 0.0
+
+            domestic_revenue_vat = price_wo_vat * import_volume * (1 + vat_rate)
+            export_revenue_wo_vat = price_wo_vat * export_volume
+            total_product_revenue = domestic_revenue_vat + export_revenue_wo_vat
+
+            row_product_name[year] = None
+            row_price_total[year] = price_wo_vat
+            row_volume_total[year] = volume
+            row_revenue_total[year] = total_product_revenue * 1000000
+
+            row_domestic_header[year] = None
+            row_domestic_price[year] = price_wo_vat
+            row_domestic_volume[year] = import_volume
+            row_domestic_revenue[year] = domestic_revenue_vat * 1000000
+
+            row_export_header[year] = None
+            row_export_price[year] = price_wo_vat
+            row_export_volume[year] = export_volume
+            row_export_revenue[year] = export_revenue_wo_vat * 1000000
+
+            total_revenue_with_vat[year] += total_product_revenue
+            total_revenue_without_vat[year] += (
+                domestic_revenue_vat / (1 + vat_rate) if (1 + vat_rate) != 0 else 0.0
+            ) + export_revenue_wo_vat
+
+        rows.extend([
+            row_product_name,
+            row_price_total,
+            row_volume_total,
+            row_revenue_total,
+            row_domestic_header,
+            row_domestic_price,
+            row_domestic_volume,
+            row_domestic_revenue,
+            row_export_header,
+            row_export_price,
+            row_export_volume,
+            row_export_revenue,
+        ])
+
+    row_other_revenue = {"Наименование статьи": "Прочая выручка"}
+    row_other_receipts = {"Наименование статьи": "Прочие поступления от операций"}
+    row_liquidation = {"Наименование статьи": "Ликвидационная стоимость"}
+    row_total_with_vat = {"Наименование статьи": "Выручка с НДС"}
+    row_total_without_vat = {"Наименование статьи": "Выручка без НДС"}
+    row_vat = {"Наименование статьи": "НДС начисленный"}
+    row_base_wo_other = {"Наименование статьи": "Выручка без НДС без прочей"}
+
+    for year in years:
+        deflator = deflators.get(year, 1.0)
+        receipts = other_operating_receipts.get(year, 0.0)
+        liquidation = liquidation_by_year.get(year, 0.0)
+        revenue_2110 = revenue_without_vat_report.get(year, 0.0)
+
+        receipts_deflated = receipts / deflator if deflator not in (0, None) else 0.0
+
+        # База: продукты + прочие ОДДС + ликвидация (всё в постоянных ценах)
+        base_wo_other = (
+            total_revenue_without_vat[year] * 1000000
+            + receipts_deflated
+            + liquidation
+        )
+
+        if year >= 2025:
+            other_revenue = 0.0
+            receipts_for_calc = 0.0
+            revenue_without_vat = base_wo_other
+            revenue_with_vat = total_revenue_with_vat[year] * 1000000 + liquidation
+        else:
+            receipts_for_calc = receipts
+            # Прочая выручка — балансирующая разница до revenue_2110
+            other_revenue = (revenue_2110 / deflator) - base_wo_other if deflator not in (0, None) else 0.0
+            # Итоговая выручка без НДС = revenue_2110 / deflator
+            revenue_without_vat = revenue_2110 / deflator if deflator not in (0, None) else 0.0
+            revenue_with_vat = revenue_without_vat + (
+                total_revenue_with_vat[year] * 1000000
+                - total_revenue_without_vat[year] * 1000000
+            )
+
+        vat_value = revenue_with_vat - revenue_without_vat
+
+        row_base_wo_other[year] = base_wo_other
+        row_other_revenue[year] = other_revenue
+        row_other_receipts[year] = receipts_deflated
+        row_liquidation[year] = liquidation
+        row_total_with_vat[year] = revenue_with_vat
+        row_total_without_vat[year] = revenue_without_vat
+        row_vat[year] = vat_value
+
+    rows.extend([
+        row_base_wo_other,
+        row_other_revenue,
+        row_other_receipts,
+        row_liquidation,
+        row_total_with_vat,
+        row_total_without_vat,
+        row_vat,
+    ])
+
+    return pd.DataFrame(rows)
 
 # ========== ОСНОВНОЕ ПРИЛОЖЕНИЕ ==========
 def main():
@@ -46,6 +252,105 @@ def main():
         st.session_state.custom_products_by_okpd = {}  # Пользовательские продукты по ОКПД
     if 'product_base_prices' not in st.session_state:
         st.session_state.product_base_prices = {}
+    if 'balance_df' not in st.session_state:
+        st.session_state.balance_df = None
+    if 'income_df' not in st.session_state:
+        st.session_state.income_df = None
+    if 'cash_flow_df' not in st.session_state:
+        st.session_state.cash_flow_df = None
+    if 'vat_rates' not in st.session_state:
+        st.session_state.vat_rates = {}
+    if 'other_operating_receipts' not in st.session_state:
+        st.session_state.other_operating_receipts = {}
+    if 'revenue_without_vat' not in st.session_state:
+        st.session_state.revenue_without_vat = {}
+    if 'price_indices_temp' not in st.session_state:
+        st.session_state.price_indices_temp = {
+            2016: 1.0495,
+            2017: 1.0171,
+            2018: 1.0456,
+            2019: 1.0476,
+            2020: 1.0718,
+            2021: 1.0627,
+            2022: 1.1226,
+            2023: 1.0830,
+            2024: 1.0817,
+            2025: 1.0680,
+            2026: 1.0400,
+            2027: 1.0400,
+            2028: 1.0400,
+            2029: 1.0400,
+            2030: 1.0400,
+            2031: 1.0400,
+            2032: 1.0400,
+            2033: 1.0400,
+            2034: 1.0400,
+            2035: 1.0400,
+        }
+    _OKPD_KEY = "24.10"  # укажи свой реальный код ОКПД
+
+    if 'volumes_temp' not in st.session_state:
+        _years_vol = list(range(2016, 2036))
+        _vol_zagotovka = [
+            0.000, 0.059, 0.1936, 0.2243, 0.2501, 0.2786, 0.3275, 0.4233,
+            0.4233, 0.5216, 0.5216, 0.5216, 1.50, 1.745, 1.745, 1.745,
+            1.745, 1.745, 1.745, 1.745
+        ]
+        _vol_sortvoy = [
+            0.000, 0.051, 0.166, 0.193, 0.215, 0.239, 0.281, 0.364,
+            0.364, 0.364, 0.364, 0.364, 0.364, 0.455, 0.455, 0.455,
+            0.455, 0.455, 0.455, 0.455
+        ]
+        st.session_state.volumes_temp = {
+            _OKPD_KEY: {
+                "Стальная заготовка": dict(zip(_years_vol, _vol_zagotovka)),
+                "Сортовой прокат": dict(zip(_years_vol, _vol_sortvoy)),
+            }
+        }
+    if 'exports_temp' not in st.session_state:
+        _years_vol = list(range(2016, 2036))
+        _exp_zagotovka = [
+            0, 0, 18.0, 18.0, 18.0, 18.0, 18.0, 18.0, 18.0, 15.0,
+            15.0, 15.0, 15.0, 15.0, 15.0, 15.0, 15.0, 15.0, 15.0, 15.0
+        ]
+        _exp_sortvoy = [
+            0, 0, 18.0, 18.0, 18.0, 18.0, 18.0, 18.0, 18.0, 15.0,
+            15.0, 15.0, 15.0, 15.0, 15.0, 15.0, 15.0, 15.0, 15.0, 15.0
+        ]
+        st.session_state.exports_temp = {
+            _OKPD_KEY: {
+                "Стальная заготовка": dict(zip(_years_vol, _exp_zagotovka)),
+                "Сортовой прокат": dict(zip(_years_vol, _exp_sortvoy)),
+            }
+        }
+
+    if 'exports_temp' not in st.session_state:
+        _years_vol = list(range(2016, 2036))
+        st.session_state.exports_temp = {
+            _OKPD_KEY: {
+                "Стальная заготовка": {year: 0.0 for year in _years_vol},
+                "Сортовой прокат": {year: 0.0 for year in _years_vol},
+            }
+        }
+
+    if 'fixed_product_prices' not in st.session_state:
+        _years_p = list(range(2016, 2036))
+        _prices_zagotovka = [
+            0.000, 44.056, 44.056, 51.911, 37.198, 67.317, 38.663, 44.056,
+            33.928, 44.056, 44.056, 44.056, 44.056, 44.056, 44.056, 44.056,
+            44.056, 44.056, 44.056, 44.056
+        ]
+        _prices_sortvoy = [
+            0.000, 72.420, 72.420, 95.879, 68.703, 124.334, 71.410, 72.420,
+            61.126, 72.420, 72.420, 72.420, 72.420, 72.420, 72.420, 72.420,
+            72.420, 72.420, 72.420, 72.420
+        ]
+        st.session_state.fixed_product_prices = {
+            "Стальная заготовка": dict(zip(_years_p, _prices_zagotovka)),
+            "Сортовой прокат": dict(zip(_years_p, _prices_sortvoy)),
+        }
+        if 'residual_value_last_year' not in st.session_state:
+            st.session_state.residual_value_last_year = 4_639_210.0
 
     # ========== САЙДБАР ДЛЯ ЗАГРУЗКИ ФАЙЛОВ ==========
     with st.sidebar:
@@ -74,6 +379,8 @@ def main():
         if balance_file:
             st.success("✅ Баланс загружен")
             st.session_state.balance_file = balance_file
+            st.session_state.balance_df = read_uploaded_excel(balance_file)
+            st.session_state.project_data.reporting_data["balance"] = st.session_state.balance_df
         else:
             if 'balance_file' in st.session_state:
                 st.success("✅ Баланс загружен (из сессии)")
@@ -90,6 +397,8 @@ def main():
         if income_file:
             st.success("✅ Фин. результаты загружены")
             st.session_state.income_file = income_file
+            st.session_state.income_df = read_uploaded_excel(income_file)
+            st.session_state.project_data.reporting_data["income"] = st.session_state.income_df
         else:
             if 'income_file' in st.session_state:
                 st.success("✅ Фин. результаты загружены (из сессии)")
@@ -106,6 +415,8 @@ def main():
         if cash_flow_file:
             st.success("✅ ОДДС загружен")
             st.session_state.cash_flow_file = cash_flow_file
+            st.session_state.cash_flow_df = read_uploaded_excel(cash_flow_file)
+            st.session_state.project_data.reporting_data["cashflow"] = st.session_state.cash_flow_df
         else:
             if 'cash_flow_file' in st.session_state:
                 st.success("✅ ОДДС загружен (из сессии)")
@@ -136,14 +447,27 @@ def main():
 
         # Кнопка очистки всех файлов
         if st.button("🗑️ Очистить все файлы", use_container_width=True):
-            for key in ['balance_file', 'income_file', 'cash_flow_file']:
+            for key in [
+                'balance_file', 'income_file', 'cash_flow_file',
+                'balance_df', 'income_df', 'cash_flow_df'
+            ]:
                 if key in st.session_state:
                     del st.session_state[key]
+
+            st.session_state.project_data.reporting_data = {
+                "balance": None,
+                "income": None,
+                "cashflow": None
+            }
+
             st.rerun()
 
-    # Вкладки
-    tab_input, tab_revenue, tab_results, tab_export = st.tabs([
-        "📝 Ввод данных", "💰 Выручка и продажи", "📈 Анализ эффективности", "💾 Экспорт"
+    tab_input, tab_reports, tab_revenue, tab_results, tab_export = st.tabs([
+        "📝 Ввод данных",
+        "📂 Загруженная отчетность",
+        "💰 Продажи",
+        "📈 Анализ эффективности",
+        "💾 Экспорт"
     ])
 
     with tab_input:
@@ -333,6 +657,12 @@ def main():
             if st.session_state[selection_key].get(product, False)
         ]
 
+        current_product_set = frozenset(selected_products)
+        if st.session_state.get("last_product_set") != current_product_set:
+            st.session_state.last_product_set = current_product_set
+            if "sales_matrix_df" in st.session_state:
+                del st.session_state["sales_matrix_df"]
+
         st.divider()
 
         # ========== ВВОД ДАННЫХ ТОЛЬКО ДЛЯ ВЫБРАННЫХ ПРОДУКТОВ ==========
@@ -478,9 +808,20 @@ def main():
                     product_volumes[product_type][year] = volume
                     product_export_shares[product_type][year] = export_pct / 100
                     product_import_shares[product_type][year] = import_pct / 100
-
+                # Сохраняем данные текущего продукта в общую модель проекта
+                st.session_state.project_data.products[product_type] = product_volumes[product_type]
+                st.session_state.project_data.export_shares[product_type] = product_export_shares[product_type]
+                st.session_state.project_data.import_shares[product_type] = product_import_shares[product_type]
                 if need_update:
                     st.rerun()
+
+        st.session_state.project_data.products = {k: v for k, v in product_volumes.items() if k in selected_products}
+        st.session_state.project_data.export_shares = {k: v for k, v in product_export_shares.items() if
+                                                       k in selected_products}
+        st.session_state.project_data.import_shares = {k: v for k, v in product_import_shares.items() if
+                                                       k in selected_products}
+        st.session_state.product_base_prices = {k: v for k, v in st.session_state.product_base_prices.items() if
+                                                k in selected_products}
 
         # ========== БЛОК 5: ЦЕНЫ (общие индексы и дефляторы) ==========
         st.subheader("💰 Ценовые индексы и дефляторы")
@@ -576,6 +917,16 @@ def main():
                 st.session_state.project_data.prices = {}  # Очищаем старые цены
                 st.session_state.project_data.product_prices = {}  # Новая структура для хранения цен по продуктам
 
+                # Перезаписываем фиксированными ценами если они заданы
+                fixed_prices = st.session_state.get("fixed_product_prices", {})
+
+                for product_type in st.session_state.project_data.product_prices:
+                    if product_type in fixed_prices:
+                        for year in st.session_state.project_data.years:
+                            if year in fixed_prices[product_type]:
+                                st.session_state.project_data.product_prices[product_type][year] = \
+                                    fixed_prices[product_type][year]
+
                 # Создаем таблицу для отображения всех цен
                 all_prices_data = []
 
@@ -637,49 +988,237 @@ def main():
             except Exception as e:
                 st.error(f"Ошибка сохранения: {e}")
 
+    with tab_reports:
+        st.header("Загруженные формы отчетности")
+
+        report_tab1, report_tab2, report_tab3 = st.tabs([
+            "📊 Бухгалтерский баланс",
+            "📈 Финансовые результаты",
+            "💰 ОДДС"
+        ])
+
+        with report_tab1:
+            if st.session_state.get("balance_df") is not None:
+                st.subheader("Содержимое файла: Бухгалтерский баланс")
+                st.dataframe(st.session_state.balance_df, use_container_width=True, height=500)
+            else:
+                st.info("Файл бухгалтерского баланса пока не загружен.")
+
+        with report_tab2:
+            if st.session_state.get("income_df") is not None:
+                st.subheader("Содержимое файла: Отчет о финансовых результатах")
+                st.dataframe(st.session_state.income_df, use_container_width=True, height=500)
+            else:
+                st.info("Файл отчета о финансовых результатах пока не загружен.")
+
+        with report_tab3:
+            if st.session_state.get("cash_flow_df") is not None:
+                st.subheader("Содержимое файла: Отчет о движении денежных средств")
+                st.dataframe(st.session_state.cash_flow_df, use_container_width=True, height=500)
+            else:
+                st.info("Файл ОДДС пока не загружен.")
+
     with tab_revenue:
-        st.header("Расчет выручки")
+        st.subheader("📊 Таблица продаж")
 
-        if st.session_state.project_data.products and st.session_state.project_data.prices:
-            revenue_data = calculate_revenue(
-                st.session_state.project_data.products,
-                st.session_state.project_data.prices,
-                st.session_state.project_data.export_shares,
-                st.session_state.project_data.import_shares,
-                st.session_state.project_data.years
-            )
+        years = st.session_state.project_data.years
 
-            st.session_state.revenue_data = revenue_data
+        if not years:
+            st.warning("Сначала задайте диапазон лет во вкладке 'Ввод данных'")
+        else:
+            # ---------- 1. Ввод НДС ----------
+            st.subheader("НДС по годам")
 
-            # Таблица выручки
-            st.subheader("📊 Выручка по годам")
-            revenue_table = []
-            for year in st.session_state.project_data.years:
-                revenue_table.append({
-                    'Год': year,
-                    'Экспорт (без НДС)': revenue_data['export_revenue'][year],
-                    'Внутренний рынок (с НДС)': revenue_data['domestic_revenue'][year],
-                    'Общая выручка': revenue_data['total_revenue'][year]
+            if 'vat_rates' not in st.session_state:
+                st.session_state.vat_rates = {year: 0.20 for year in years}
+
+            vat_data = []
+            for year in years:
+                vat_data.append({
+                    "Год": year,
+                    "Ставка НДС (%)": st.session_state.vat_rates.get(year, 0.20) * 100
                 })
 
-            df_revenue = pd.DataFrame(revenue_table)
-            st.dataframe(df_revenue.style.format({
-                'Экспорт (без НДС)': '{:,.0f}',
-                'Внутренний рынок (с НДС)': '{:,.0f}',
-                'Общая выручка': '{:,.0f}'
-            }))
+            df_vat = pd.DataFrame(vat_data)
 
-            # График
-            fig = go.Figure()
-            fig.add_trace(go.Bar(name='Экспорт', x=st.session_state.project_data.years,
-                                 y=[revenue_data['export_revenue'][y] for y in st.session_state.project_data.years]))
-            fig.add_trace(go.Bar(name='Внутренний рынок', x=st.session_state.project_data.years,
-                                 y=[revenue_data['domestic_revenue'][y] for y in st.session_state.project_data.years]))
-            fig.update_layout(title="Динамика выручки", barmode='stack', xaxis_title="Год", yaxis_title="Руб.")
-            st.plotly_chart(fig, use_container_width=True)
+            edited_vat = st.data_editor(
+                df_vat,
+                key="vat_editor",
+                num_rows="fixed",
+                column_config={
+                    "Год": st.column_config.NumberColumn(disabled=True),
+                    "Ставка НДС (%)": st.column_config.NumberColumn(
+                        format="%.2f",
+                        min_value=0.0,
+                        max_value=100.0,
+                        step=0.1
+                    )
+                }
+            )
 
-        else:
-            st.warning("Сначала введите данные о продукции и ценах во вкладке 'Ввод данных'")
+            for _, row in edited_vat.iterrows():
+                year = int(row["Год"])
+                st.session_state.vat_rates[year] = float(row["Ставка НДС (%)"]) / 100
+
+            st.divider()
+
+            # ---------- 2. Данные из отчетности ----------
+            st.subheader("Данные из отчетности")
+
+            # --- Автопарсинг из загруженных файлов ---
+            def extract_row_by_code(file, code):
+                """Читает строку из Excel по коду и возвращает {год: значение}"""
+                if file is None:
+                    return {}
+                try:
+                    file.seek(0)
+                    df = pd.read_excel(file, header=None)
+                    df = df.dropna(how="all").dropna(axis=1, how="all").reset_index(drop=True)
+
+                    # Ищем строку с нужным кодом
+                    code_row_idx = None
+                    code_col_idx = None
+                    for i in range(len(df)):
+                        for j in range(len(df.columns)):
+                            cell = str(df.iloc[i, j]).strip().split(".")[0]
+                            if cell == str(code):
+                                code_row_idx = i
+                                code_col_idx = j
+                                break
+                        if code_row_idx is not None:
+                            break
+
+                    if code_row_idx is None:
+                        return {}
+
+                    # Ищем строку с годами выше
+                    header_row_idx = None
+                    for i in range(code_row_idx - 1, -1, -1):
+                        row_vals = [str(v).strip().split(".")[0] for v in df.iloc[i].tolist()]
+                        years_found = [int(v) for v in row_vals if v.isdigit() and 2000 <= int(v) <= 2100]
+                        if len(years_found) >= 2:
+                            header_row_idx = i
+                            break
+
+                    if header_row_idx is None:
+                        return {}
+
+                    header = df.iloc[header_row_idx].tolist()
+                    values = df.iloc[code_row_idx].tolist()
+
+                    result = {}
+                    for col_idx, h in enumerate(header):
+                        try:
+                            h_str = str(h).strip().split(".")[0]
+                            if h_str.isdigit():
+                                year = int(h_str)
+                                if 2000 <= year <= 2100:
+                                    val = values[col_idx]
+                                    if pd.isna(val):
+                                        val = 0.0
+                                    result[year] = float(str(val).replace(",", "").replace(" ", ""))
+                        except:
+                            continue
+                    return result
+                except Exception as e:
+                    st.caption(f"Ошибка чтения кода {code}: {e}")
+                    return {}
+
+            # Получаем файлы из session_state
+            income_file = st.session_state.get("income_file")
+            cash_flow_file = st.session_state.get("cash_flow_file")
+
+            # Парсим нужные строки
+            revenue_2110_from_file = extract_row_by_code(income_file, 2110)
+            receipts_4112_from_file = extract_row_by_code(cash_flow_file, 4112)
+
+            # Инициализируем session_state и сразу заполняем из файлов
+            if 'revenue_without_vat' not in st.session_state:
+                st.session_state.revenue_without_vat = {}
+            if 'other_operating_receipts' not in st.session_state:
+                st.session_state.other_operating_receipts = {}
+
+            # Записываем данные из файлов для лет, которые в них есть
+            for year in years:
+                if year in revenue_2110_from_file:
+                    st.session_state.revenue_without_vat[year] = revenue_2110_from_file[year]
+                elif year not in st.session_state.revenue_without_vat:
+                    st.session_state.revenue_without_vat[year] = 0.0
+
+                if year in receipts_4112_from_file:
+                    st.session_state.other_operating_receipts[year] = receipts_4112_from_file[year]
+                elif year not in st.session_state.other_operating_receipts:
+                    st.session_state.other_operating_receipts[year] = 0.0
+
+            # Таблица — заполнена из файлов, можно скорректировать вручную
+            report_data = []
+            for year in years:
+                report_data.append({
+                    "Год": year,
+                    "Выручка без НДС (2110)": st.session_state.revenue_without_vat.get(year, 0.0),
+                    "Прочие поступления от операций": st.session_state.other_operating_receipts.get(year, 0.0),
+                })
+
+            df_report = pd.DataFrame(report_data)
+
+            edited_report = st.data_editor(
+                df_report,
+                key="report_editor",
+                num_rows="fixed",
+                column_config={
+                    "Год": st.column_config.NumberColumn(disabled=True),
+                    "Выручка без НДС (2110)": st.column_config.NumberColumn(
+                        format="%.2f", min_value=0.0, step=1000.0
+                    ),
+                    "Прочие поступления от операций": st.column_config.NumberColumn(
+                        format="%.2f", min_value=0.0, step=1000.0
+                    ),
+                }
+            )
+
+            for _, row in edited_report.iterrows():
+                year = int(row["Год"])
+                st.session_state.revenue_without_vat[year] = float(row["Выручка без НДС (2110)"])
+                st.session_state.other_operating_receipts[year] = float(row["Прочие поступления от операций"])
+
+
+        current_indices = st.session_state.price_indices_temp.copy() if 'price_indices_temp' in st.session_state else {}
+        deflators = {
+            year: calculate_deflator(year, st.session_state.base_year, current_indices)
+            for year in st.session_state.project_data.years
+        }
+
+        liquidation_by_year = {year: 0.0 for year in st.session_state.project_data.years}
+        last_year = st.session_state.project_data.years[-1]
+        liquidation_by_year[last_year] = (
+                st.session_state.get("increment_nwc_last_year", 0.0) +
+                st.session_state.get("residual_value_last_year", 0.0)
+        )
+
+        sales_matrix_df = build_sales_matrix(
+            project_data=st.session_state.project_data,
+            years=st.session_state.project_data.years,
+            deflators=deflators,
+            vat_rates=st.session_state.vat_rates,
+            other_operating_receipts=st.session_state.other_operating_receipts,
+            liquidation_by_year=liquidation_by_year,
+            revenue_without_vat_report=st.session_state.revenue_without_vat,
+            product_base_prices=st.session_state.product_base_prices
+        )
+
+        st.session_state.sales_matrix_df = sales_matrix_df
+
+        format_dict = {}
+        for year in st.session_state.project_data.years:
+            format_dict[year] = "{:,.7f}"
+
+        st.dataframe(
+            sales_matrix_df.style.format(format_dict),
+            use_container_width=True,
+            hide_index=True
+        )
+
+
 
     with tab_results:
         st.header("Анализ эффективности инвестиций")

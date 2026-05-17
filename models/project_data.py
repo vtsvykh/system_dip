@@ -21,6 +21,11 @@ class ProjectData:
         self.sector = ""  # Выбранная отрасль
         self.okpd_code = ""  # Выбранный код ОКПД2
         self.price_indices = {}
+        self.reporting_data = {
+            "balance": None,
+            "income": None,
+            "cashflow": None
+        }
 
     def to_dict(self):
         return {
