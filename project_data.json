@@ -66,9 +66,9 @@
   },
   "discount_rate": 0.1,
   "tax_rate": 0.2,
-  "equipment_share": 0.6,
+  "equipment_share": 0.562,
   "equipment_depreciation": 0.15,
-  "construction_depreciation": 0.05,
+  "construction_depreciation": 0.025,
   "products": {
     "Стальная заготовка": {
       "2016": 0.0,

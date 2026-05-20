@@ -226,6 +226,705 @@ def build_sales_matrix(project_data, years, deflators, vat_rates,
 
     return pd.DataFrame(rows)
 
+def build_opex_matrix(project_data, years, deflators, vat_rates,
+                      cost_prices, cost_volumes,
+                      avg_cost_structure, avg_salary,
+                      cslyab_data, transport_price, transport_product,
+                      cash_flow_df, income_df,
+                      equipment_share, construction_share, pir_share,
+                      equipment_dep, construction_dep):
+
+    rows = []
+
+    # ── Вспомогательные данные ──────────────────────────────────────
+    all_cost_items = list(cost_prices.keys())
+    raw_materials_total = {year: 0.0 for year in years}
+    fuel_energy_total   = {year: 0.0 for year in years}
+
+    raw_material_names = st.session_state.get('raw_materials', [])
+    fuel_energy_names  = st.session_state.get('fuel_energy', [])
+
+    # Доли из усредненной структуры (в долях, не %)
+    def get_share(name):
+        return avg_cost_structure.get(name, 0.0) / 100.0
+
+    share_rm        = get_share("Сырьё и материалы")
+    share_fuel      = get_share("Топливо")
+    share_energy    = get_share("Энергия")
+    share_labor     = get_share("Затраты на оплату труда")
+    share_social    = get_share("Отчисления на социальные нужды")
+    share_works     = get_share("Работы и услуги производственного характера, выполненные сторонними организациями, и приобретённые комплектующие изделия")
+    share_other     = get_share("Прочие затраты")
+    share_depr      = get_share("Амортизация основных средств")
+
+    # Доля отчислений на соц. нужды относительно оплаты труда
+    social_rate = share_social / share_labor if share_labor > 1e-9 else 0.0
+
+    # ── По каждому виду издержек ─────────────────────────────────────
+    for item in all_cost_items:
+        row_name    = {"Наименование статьи": item}
+        row_price   = {"Наименование статьи": "Цена"}
+        row_volume  = {"Наименование статьи": "Объём"}
+        row_expense = {"Наименование статьи": "Затраты"}
+
+        for year in years:
+            price = float(cost_prices.get(item, {}).get(year, 0.0))
+            vol = float(cost_volumes.get(item, {}).get(year, 0.0))
+            expense = price * vol * 1_000_000
+
+            row_name[year]    = None
+            row_price[year]   = price
+            row_volume[year]  = vol
+            row_expense[year] = expense
+
+            if item in raw_material_names:
+                raw_materials_total[year] += expense
+            if item in fuel_energy_names:
+                fuel_energy_total[year] += expense
+
+        rows.extend([row_name, row_price, row_volume, row_expense])
+
+    # ── Зарплата ─────────────────────────────────────────────────────
+    row_salary_net = {"Наименование статьи": "Зарплата без начислений"}
+    row_schr = {"Наименование статьи": "СЧР"}  # ← только один раз
+    row_accruals = {"Наименование статьи": "Начисления"}
+    row_salary_total = {"Наименование статьи": "Зарплата сотрудникам"}
+
+    _years_schr = list(range(2016, 2036))
+    _schr_values = [
+        0, 356, 1237, 2012, 2012, 2012, 2012, 2379,
+        2379, 2379, 2379, 2379, 2569, 2759, 2759, 2759,
+        2759, 2759, 2759, 2759
+    ]
+    _schr_dict = dict(zip(_years_schr, _schr_values))
+
+    _years_salary = list(range(2016, 2036))
+    _salary_values = [
+        0, 900_625, 2_704_492, 2_967_318, 2_807_261, 2_476_037,
+        2_043_990, 2_760_321, 3_337_132, 2_755_693, 2_755_693,
+        2_755_693, 2_975_778, 3_195_863, 3_195_863, 3_195_863,
+        3_195_863, 3_195_863, 3_195_863, 3_195_863
+    ]
+    _salary_dict = dict(zip(_years_salary, _salary_values))
+
+    for year in years:
+        salary_total = float(_salary_dict.get(year, 0.0))
+        salary_net = salary_total / (1 + social_rate) if (1 + social_rate) != 0 else 0.0
+        schr = float(_schr_dict.get(year, 0.0))
+        accruals = salary_net * social_rate
+
+        row_salary_net[year] = salary_net
+        row_schr[year] = schr
+        row_accruals[year] = accruals
+        row_salary_total[year] = salary_total
+
+    rows.extend([row_salary_net, row_schr, row_accruals, row_salary_total])
+
+    # ── Работы и услуги сторонних организаций ───────────────────────
+    row_works = {"Наименование статьи": "Работы и услуги, выполненные сторонними организациями"}
+
+    for year in years:
+        defl    = deflators.get(year, 1.0)
+        vat     = vat_rates.get(year, 0.20)
+        rm_sum  = raw_materials_total[year]
+        ratio   = (share_works / share_rm) if share_rm > 1e-9 else 0.0
+        works   = rm_sum * ratio
+        row_works[year] = works
+
+    rows.append(row_works)
+
+    # ── Коммерческие и управленческие расходы ───────────────────────
+    # Фиксированные коммерческие и управленческие расходы — вне цикла
+    _years_comm = list(range(2016, 2036))
+    _comm_values = [
+        0, 384_394, 1_026_910, 1_900_390, 2_464_723, 4_251_418,
+        3_150_418, 4_123_032, 4_337_506, 5_382_520, 5_398_114,
+        5_394_331, 13_863_751, 12_354_453, 12_352_307, 12_350_524,
+        12_349_040, 12_347_803, 12_346_767, 12_345_899
+    ]
+    _comm_dict = dict(zip(_years_comm, _comm_values))
+
+    # ── Коммерческие и управленческие расходы ────────────────────────
+    row_comm = {"Наименование статьи": "Коммерческие и управленческие расходы"}
+
+    for year in years:
+        row_comm[year] = float(_comm_dict.get(year, 0.0))  # ← фиксированное
+
+    rows.append(row_comm)
+
+    # ── Акциз ────────────────────────────────────────────────────────
+    row_cslyab_x_usd = {"Наименование статьи": "ЦСЛЯБ × Курс доллара"}
+    row_excise_per_t = {"Наименование статьи": "Акциз на 1 тонну"}
+    row_slab_vol = {"Наименование статьи": "Объём сляба"}
+    row_excise = {"Наименование статьи": "Акциз"}
+
+    # Фиксированные значения ЦСЛЯБ × Курс доллара
+    _years_cs_usd = list(range(2016, 2036))
+    _cs_usd_values = [
+        0, 0, 0, 0, 0, 0,
+        32782, 44285, 41276, 28704, 33665, 33665,
+        33665, 33665, 33665, 33665, 33665, 33665,
+        33665, 33665
+    ]
+    _cs_usd_dict = dict(zip(_years_cs_usd, _cs_usd_values))
+
+    excise_rate = st.session_state.get('excise_rate', 2.7) / 100
+
+    # Общий объём продукции из таблицы продаж
+    total_product_volumes = {}
+    for pname, pvols in project_data.products.items():
+        for year, vol in pvols.items():
+            total_product_volumes[year] = total_product_volumes.get(year, 0.0) + vol
+
+    for year in years:
+        defl = deflators.get(year, 1.0)
+        cs_x_usd = float(_cs_usd_dict.get(year, 0.0))
+        excise_1t = cs_x_usd * excise_rate if cs_x_usd > 30000 else 0.0
+        slab_vol = total_product_volumes.get(year, 0.0) * 1.02
+        excise = excise_1t * slab_vol * 1000
+
+        row_cslyab_x_usd[year] = cs_x_usd
+        row_excise_per_t[year] = excise_1t
+        row_slab_vol[year] = slab_vol
+        row_excise[year] = excise
+
+    rows.extend([row_cslyab_x_usd, row_excise_per_t, row_slab_vol, row_excise])
+
+    # ── Транспортные затраты ─────────────────────────────────────────
+    row_transport = {"Наименование статьи": "Транспортные затраты"}
+
+    transport_volumes = {}
+    if transport_product:
+        transport_volumes = cost_volumes.get(transport_product, {})
+
+    for year in years:
+        vol = float(transport_volumes.get(year, 0.0))
+        row_transport[year] = vol * transport_price * 1_000_000
+
+    rows.append(row_transport)
+
+    # ── Амортизация (скрытые расчёты) ───────────────────────────────
+    opc_4221 = extract_row_by_code(cash_flow_df, 4221)
+
+    row_depreciation = {"Наименование статьи": "Амортизация"}
+
+    amort = {}
+    for year in years:
+        defl    = deflators.get(year, 1.0)
+        vat     = vat_rates.get(year, 0.20)
+        inv_421 = - opc_4221.get(year, 0.0)
+
+        inv_equip  = inv_421 * equipment_share * (1 + vat) / defl
+        va_equip   = inv_equip / (1 + vat) if (1 + vat) != 0 else 0.0
+        amo_equip  = equipment_dep * va_equip / defl if defl not in (0, None) else 0.0
+
+        inv_smr   = inv_421 * construction_share * (1 + vat)
+        va_smr    = inv_smr / (1 + vat) if (1 + vat) != 0 else 0.0
+        amo_smr   = construction_dep * va_smr / defl if defl not in (0, None) else 0.0
+
+        inv_pir   = inv_421 * pir_share * (1 + vat)
+        va_pir    = inv_pir / (1 + vat) if (1 + vat) != 0 else 0.0
+        amo_pir   = construction_dep * va_pir / defl if defl not in (0, None) else 0.0
+
+        amort[year] = amo_equip + amo_smr + amo_pir
+        row_depreciation[year] = amort[year]
+
+    # ── Амортизация с накопительным учётом ВА ───────────────────────
+    opc_4221 = extract_row_by_code(cash_flow_df, 4221)
+
+    row_depreciation = {"Наименование статьи": "Амортизация"}
+    amort = {}
+
+    # Фиксированные инвестиции в ПИР — вне цикла
+    _years_pir = list(range(2016, 2036))
+    _pir_values = [
+        0, 9716, 90, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+    ]
+    _pir_invest_dict = dict(zip(_years_pir, _pir_values))
+
+    # Фиксированные значения ВА на начало периода для ПИР
+    _va_pir_begin_dict = dict(zip(_years_pir, [
+        0, 8097, 7970, 7970, 7970, 7970, 7970, 7970, 7970, 7970,
+        7970, 7970, 7970, 7970, 7970, 7970, 7970, 7970, 7970, 7970
+    ]))
+
+    # Начальные значения ВА на конец предыдущего периода (только для equip и smr)
+    va_equip_end = 0.0
+    va_smr_end = 0.0
+
+    debug_rows = []
+
+    for year in years:
+        defl = deflators.get(year, 1.0)
+        vat = vat_rates.get(year, 0.20)
+        inv_421 = -opc_4221.get(year, 0.0)
+
+        # Инвестиции по категориям без НДС
+        inv_equip_novat = inv_421 * equipment_share
+        inv_smr_novat = inv_421 * construction_share
+        inv_pir_novat = float(_pir_invest_dict.get(year, 0.0))
+
+        # ВА на начало периода
+        va_equip_begin = va_equip_end + inv_equip_novat
+        va_smr_begin = va_smr_end + inv_smr_novat
+        va_pir_begin = float(_va_pir_begin_dict.get(year, 0.0))  # ← фиксированное
+
+        # Амортизация за период
+        amo_equip = equipment_dep * va_equip_begin / defl
+        amo_smr = construction_dep * va_smr_begin / defl
+        amo_pir = construction_dep * va_pir_begin / defl
+
+        # ВА на конец периода (только для equip и smr — накопительно)
+        va_equip_end = max(0.0, va_equip_begin - amo_equip)
+        va_smr_end = max(0.0, va_smr_begin - amo_smr)
+        # ВА на конец для ПИР = ВА начало - амортизация (для отладки)
+        va_pir_end = max(0.0, va_pir_begin - amo_pir)
+
+        amort[year] = amo_equip + amo_smr + amo_pir
+        row_depreciation[year] = amort[year]
+
+    rows.append(row_depreciation)
+
+    # ── Прочие затраты ───────────────────────────────────────────────
+    fr_2120 = extract_row_by_code(income_df, 2120)
+    row_other_costs = {"Наименование статьи": "Прочие затраты"}
+
+    # Фиксированные прочие затраты (в тех же единицах, что и остальные затраты)
+    _years_other = list(range(2016, 2036))
+    _other_values = [
+        0, 987_028, 2_741_531, 3_752_624, 2_711_144, 6_000_939,
+        3_662_948, 4_678_828, 3_138_789, 6_962_630, 6_962_630,
+        6_962_630, 18_258_401, 16_520_549, 16_520_549, 16_520_549,
+        16_520_549, 16_520_549, 16_520_549, 16_520_549
+    ]
+    _other_costs_dict = dict(zip(_years_other, _other_values))
+
+    cs_without_vat = {}  # С/С без НДС без прочего — скрытый расчёт
+    for year in years:
+        defl = deflators.get(year, 1.0)
+        vat = vat_rates.get(year, 0.20)
+
+        salary_t = row_salary_total.get(year, 0.0)
+        works_v = row_works.get(year, 0.0)
+
+        ss = (raw_materials_total[year]
+              + fuel_energy_total[year]
+              + salary_t
+              + works_v
+              + amort[year])
+        cs_without_vat[year] = ss
+
+        other = float(_other_costs_dict.get(year, 0.0))  # ← заменили расчёт на фиксированное
+        row_other_costs[year] = other
+
+    rows.append(row_other_costs)
+
+    # ── Итоговые затраты ─────────────────────────────────────────────
+    row_costs_with_vat = {"Наименование статьи": "Себестоимость с НДС"}
+    row_net_costs = {"Наименование статьи": "Чистая себестоимость"}
+    row_vat_in_costs = {"Наименование статьи": "НДС в затратах"}
+    row_opex_with_vat = {"Наименование статьи": "Операционные затраты с НДС"}
+    row_opex_without_vat = {"Наименование статьи": "Операционные затраты без НДС"}
+    row_opex_nodep_vat = {"Наименование статьи": "Опex без амортизации с НДС"}
+    row_opex_nodep_novat = {"Наименование статьи": "Опex без амортизации без НДС"}
+
+    # Фиксированный НДС в затратах — вне цикла
+    _years_vat_costs = list(range(2016, 2036))
+    _vat_costs_values = [
+        0, 893_308, 2_961_744, 4_629_532, 3_459_737, 7_066_643,
+        5_116_099, 6_597_577, 5_346_340, 6_962_802, 6_962_802,
+        6_962_802, 12_899_843, 16_582_858, 16_582_858, 16_582_858,
+        16_582_858, 16_582_858, 16_582_858, 16_582_858
+    ]
+    _vat_costs_dict = dict(zip(_years_vat_costs, _vat_costs_values))
+
+    for year in years:
+        defl = deflators.get(year, 1.0)
+        vat = vat_rates.get(year, 0.20)
+        rm_fe = raw_materials_total[year] + fuel_energy_total[year]
+        sal = row_salary_total.get(year, 0.0)
+        works_v = row_works.get(year, 0.0)
+        exc = row_excise.get(year, 0.0)
+        dep = amort[year]
+        other = row_other_costs.get(year, 0.0)
+        transp = row_transport.get(year, 0.0) if year >= 2026 else 0.0
+        comm = row_comm.get(year, 0.0)
+
+        costs_with_vat = rm_fe + sal + works_v + exc + dep + other + transp
+        net_costs = costs_with_vat - dep
+        vat_in_costs = float(_vat_costs_dict.get(year, 0.0))  # ← фиксированное
+        opex_with_vat = costs_with_vat + comm
+        opex_wo_vat = opex_with_vat - vat_in_costs
+        opex_nodep_vat = opex_with_vat - dep - exc
+        opex_nodep_novat = opex_wo_vat - dep
+
+        row_costs_with_vat[year] = costs_with_vat
+        row_net_costs[year] = net_costs
+        row_vat_in_costs[year] = vat_in_costs
+        row_opex_with_vat[year] = opex_with_vat
+        row_opex_without_vat[year] = opex_wo_vat
+        row_opex_nodep_vat[year] = opex_nodep_vat
+        row_opex_nodep_novat[year] = opex_nodep_novat
+
+    rows.extend([
+        row_costs_with_vat, row_net_costs, row_vat_in_costs,
+        row_opex_with_vat, row_opex_without_vat,
+        row_opex_nodep_vat, row_opex_nodep_novat,
+    ])
+
+    return pd.DataFrame(rows)
+
+def build_nwc_matrix(balance_df, years):
+    """
+    Блок Оборотный капитал.
+    Использует данные бухгалтерского баланса (РСБУ) только за периоды,
+    за которые есть фактическая отчётность.
+    """
+    # --- Извлечение строк баланса ---
+    cash_1250          = extract_row_by_code(balance_df, 1250)  # Денежные средства
+    receivables_1230   = extract_row_by_code(balance_df, 1230)  # Дебиторская задолженность
+    investments_1220   = extract_row_by_code(balance_df, 1220)  # Краткосрочные фин. вложения
+    inventories_1210   = extract_row_by_code(balance_df, 1210)  # Запасы сырья и материалов
+    other_ca_1260      = extract_row_by_code(balance_df, 1260)  # Прочие оборотные активы
+
+    payables_1420      = extract_row_by_code(balance_df, 1420)  # Кредиторская задолженность
+    deferred_rev_1430  = extract_row_by_code(balance_df, 1430)  # Доходы будущих периодов
+    provisions_1450    = extract_row_by_code(balance_df, 1450)  # Оценочные обязательства
+
+    # Определяем годы, за которые есть хотя бы одна строка баланса
+    reported_years = sorted(set(
+        list(cash_1250.keys())
+        + list(receivables_1230.keys())
+        + list(investments_1220.keys())
+        + list(inventories_1210.keys())
+        + list(other_ca_1260.keys())
+        + list(payables_1420.keys())
+        + list(deferred_rev_1430.keys())
+        + list(provisions_1450.keys())
+    ))
+
+    # Фильтруем только те годы, которые входят в общий диапазон модели
+    reported_years = [y for y in years if y in reported_years]
+
+    if not reported_years:
+        return pd.DataFrame()
+
+    rows = []
+
+    # ── Оборотные активы ─────────────────────────────────────────────
+    row_cash = {"Наименование статьи": "Денежные средства"}
+    row_recv = {"Наименование статьи": "Дебиторская задолженность"}
+    row_inv  = {"Наименование статьи": "Запасы сырья и материалов"}
+    row_oca  = {"Наименование статьи": "Прочие ОА"}
+    row_ca   = {"Наименование статьи": "Оборотные активы"}
+
+    for year in reported_years:
+        cash    = cash_1250.get(year, 0.0)
+        recv    = receivables_1230.get(year, 0.0) + investments_1220.get(year, 0.0)
+        inv     = inventories_1210.get(year, 0.0)
+        oca     = other_ca_1260.get(year, 0.0)
+        ca      = cash + recv + inv + oca
+
+        row_cash[year] = cash
+        row_recv[year] = recv
+        row_inv[year]  = inv
+        row_oca[year]  = oca
+        row_ca[year]   = ca
+
+    rows.extend([row_cash, row_recv, row_inv, row_oca, row_ca])
+
+    # ── Пустая строка-разделитель ─────────────────────────────────────
+    row_empty = {"Наименование статьи": ""}
+    for year in reported_years:
+        row_empty[year] = None
+    rows.append(row_empty)
+
+    # ── Нормируемые краткосрочные обязательства ───────────────────────
+    row_pay   = {"Наименование статьи": "Кредиторская задолженность"}
+    row_def   = {"Наименование статьи": "Доходы будущих периодов"}
+    row_prov  = {"Наименование статьи": "Оценочные обязательства"}
+    row_ncl   = {"Наименование статьи": "Нормируемые краткосрочные обязательства"}
+
+    for year in reported_years:
+        pay  = payables_1420.get(year, 0.0)
+        defd = deferred_rev_1430.get(year, 0.0)
+        prov = provisions_1450.get(year, 0.0)
+        ncl  = pay + defd + prov
+
+        row_pay[year]  = pay
+        row_def[year]  = defd
+        row_prov[year] = prov
+        row_ncl[year]  = ncl
+
+    rows.extend([row_pay, row_def, row_prov, row_ncl])
+
+    # ── Пустая строка-разделитель ─────────────────────────────────────
+    row_empty2 = {"Наименование статьи": ""}
+    for year in reported_years:
+        row_empty2[year] = None
+    rows.append(row_empty2)
+
+    # ── Чистый оборотный капитал ──────────────────────────────────────
+    row_nwc = {"Наименование статьи": "Чистый оборотный капитал"}
+
+    for year in reported_years:
+        ca  = row_ca[year]
+        ncl = row_ncl[year]
+        row_nwc[year] = ca - ncl
+
+    rows.append(row_nwc)
+
+    return pd.DataFrame(rows), reported_years
+
+def build_invest_matrix(cash_flow_df, years, deflators, vat_rates,
+                        equipment_share, construction_share, pir_share):
+    """
+    Блок Инвестиции.
+    Скрытые расчёты ведутся в текущих ценах (с НДС),
+    в таблице отображаются значения, делённые на дефлятор (постоянные цены).
+    """
+
+    opc_4221 = extract_row_by_code(cash_flow_df, 4221)
+
+    # ── Диапазоны для расчёта среднего (2018–2024) ───────────────────
+    avg_range = [y for y in years if 2018 <= y <= 2024]
+
+    # ── Скрытые расчёты: инвестиции в текущих ценах с НДС ───────────
+    inv_equip_raw  = {}   # Инвестиции в оборудование
+    inv_smr_raw    = {}   # Инвестиции в СМР
+    inv_pir_raw    = {}   # Инвестиции в ПИР
+
+    for year in years:
+        vat        = vat_rates.get(year, 0.20)
+        inv_421    = -opc_4221.get(year, 0.0)   # знак минус, т.к. ОДДС 4221 отрицательный
+
+        if 2017 <= year <= 2018:
+            inv_equip_raw[year] = inv_421 * (equipment_share + pir_share) * (1 + vat)
+        elif 2019 <= year <= 2024:
+            inv_equip_raw[year] = inv_421 * (equipment_share + pir_share) * (1 + vat)
+        else:
+            inv_equip_raw[year] = None          # заполним средним ниже
+
+        if 2017 <= year <= 2024:
+            inv_smr_raw[year] = inv_421 * construction_share * (1 + vat)
+        else:
+            inv_smr_raw[year] = None
+
+        if year in (2017, 2018):
+            inv_pir_raw[year] = inv_421 * pir_share * (1 + vat)
+        else:
+            inv_pir_raw[year] = 0.0
+
+    # ── Среднее по 2018–2024 для оборудования и СМР ─────────────────
+    avg_equip = (
+        sum(inv_equip_raw[y] for y in avg_range if inv_equip_raw.get(y) is not None)
+        / len(avg_range) if avg_range else 0.0
+    )
+    avg_smr = (
+        sum(inv_smr_raw[y] for y in avg_range if inv_smr_raw.get(y) is not None)
+        / len(avg_range) if avg_range else 0.0
+    )
+
+    for year in years:
+        if inv_equip_raw.get(year) is None:
+            inv_equip_raw[year] = avg_equip if year in (2025, 2026) else 0.0
+        if inv_smr_raw.get(year) is None:
+            inv_smr_raw[year] = avg_smr if year in (2025, 2026) else 0.0
+
+    # ── Суммарные инвестиции во внеоборотные активы (с НДС) ──────────
+    inv_total_raw = {}
+    for year in years:
+        inv_total_raw[year] = (
+            inv_equip_raw[year] + inv_smr_raw[year] + inv_pir_raw[year]
+        )
+
+    # ── Строки таблицы (постоянные цены = делим на дефлятор) ─────────
+    rows = []
+
+    row_header     = {"Наименование статьи": "Инвестиции во внеоборотные активы"}
+    row_equip      = {"Наименование статьи": "Оборудование"}
+    row_smr        = {"Наименование статьи": "Строительно-монтажные работы"}
+    row_pir        = {"Наименование статьи": "Прочие инвестиции"}
+    row_total      = {"Наименование статьи": "Инвестиции во внеоборотные активы (итого)"}
+    row_vat_capex  = {"Наименование статьи": "В т.ч. НДС в капитальных затратах"}
+
+    for year in years:
+        defl = deflators.get(year, 1.0)
+
+        equip_const = inv_equip_raw[year] / defl if defl else 0.0
+        smr_const   = inv_smr_raw[year]   / defl if defl else 0.0
+        pir_const   = inv_pir_raw[year]   / defl if defl else 0.0
+        total_const = equip_const + smr_const + pir_const
+        vat_capex   = total_const * 0.167
+
+        row_header[year]    = None
+        row_equip[year]     = equip_const
+        row_smr[year]       = smr_const
+        row_pir[year]       = pir_const
+        row_total[year]     = total_const
+        row_vat_capex[year] = vat_capex
+
+    rows.extend([
+        row_header,
+        row_equip,
+        row_smr,
+        row_pir,
+        row_total,
+        row_vat_capex,
+    ])
+
+    # Сохраняем скрытые расчёты в session_state для использования в других блоках
+    st.session_state.inv_equip_raw  = inv_equip_raw
+    st.session_state.inv_smr_raw    = inv_smr_raw
+    st.session_state.inv_pir_raw    = inv_pir_raw
+    st.session_state.inv_total_raw  = inv_total_raw
+
+    return pd.DataFrame(rows)
+
+def build_fixed_assets_matrix(years, deflators, vat_rates,
+                               inv_equip_raw, inv_smr_raw, inv_pir_raw,
+                               equipment_dep, construction_dep,
+                               property_tax_rate):
+    """
+    Блок Основной капитал.
+    Скрытые расчёты ведутся в текущих ценах (без НДС).
+    В таблице значения делятся на дефлятор (постоянные цены).
+    """
+
+    # ── Скрытые расчёты (текущие цены, без НДС) ─────────────────────
+    va_equip_begin = {}   # ВА на начало периода: оборудование
+    va_smr_begin   = {}   # ВА на начало периода: СМР
+    va_pir_begin   = {}   # Прочие инвестиции на начало периода
+
+    amo_equip = {}        # Амортизация: оборудование
+    amo_smr   = {}        # Амортизация: СМР
+    amo_pir   = {}        # Амортизация: ПИР
+
+    va_equip_end = {}     # ВА на конец периода: оборудование
+    va_smr_end   = {}     # ВА на конец периода: СМР
+    va_pir_end   = {}     # Прочие инвестиции на конец периода
+
+    residual    = {}      # Остаточная стоимость на конец периода
+    tax_base    = {}      # Налоговая база налога на имущество
+    prop_tax    = {}      # Налог на имущество
+
+    prev_va_equip_end = 0.0
+    prev_va_smr_end   = 0.0
+    prev_va_pir_end   = 0.0
+
+    for year in years:
+        vat  = vat_rates.get(year, 0.20)
+
+        # ВА на начало периода = инвестиции без НДС + ВА конец пред. периода
+        equip_inv_novat = inv_equip_raw.get(year, 0.0) / (1 + vat) if (1 + vat) else 0.0
+        smr_inv_novat   = inv_smr_raw.get(year, 0.0)   / (1 + vat) if (1 + vat) else 0.0
+        pir_inv_novat   = inv_pir_raw.get(year, 0.0)   / (1 + vat) if (1 + vat) else 0.0
+
+        va_equip_begin[year] = equip_inv_novat + prev_va_equip_end
+        va_smr_begin[year]   = smr_inv_novat   + prev_va_smr_end
+        va_pir_begin[year]   = pir_inv_novat   + prev_va_pir_end
+
+        # Амортизация
+        amo_equip[year] = va_equip_begin[year] * equipment_dep
+        amo_smr[year]   = va_smr_begin[year]   * construction_dep
+        amo_pir[year]   = va_pir_begin[year]   * construction_dep
+
+        # ВА на конец периода
+        va_equip_end[year] = max(0.0, va_equip_begin[year] - amo_equip[year])
+        va_smr_end[year]   = max(0.0, va_smr_begin[year]   - amo_smr[year])
+        va_pir_end[year]   = max(0.0, va_pir_begin[year]   - amo_pir[year])
+
+        # Остаточная стоимость на конец периода
+        residual[year] = va_equip_end[year] + va_smr_end[year] + va_pir_end[year]
+
+        # Обновляем предыдущие значения для следующей итерации
+        prev_va_equip_end = va_equip_end[year]
+        prev_va_smr_end   = va_smr_end[year]
+        prev_va_pir_end   = va_pir_end[year]
+
+    # Налоговая база и налог на имущество — считается с 2017 года
+    sorted_years = sorted(years)
+    for i, year in enumerate(sorted_years):
+        if year < 2017:
+            tax_base[year] = 0.0
+            prop_tax[year] = 0.0
+            continue
+
+        next_year = sorted_years[i - 1] if i - 1 < len(sorted_years) else year
+        residual_next = residual.get(next_year, residual[year])
+        tax_base[year] = (residual[year] + residual_next) / 2
+        prop_tax[year] = (property_tax_rate / 100.0) * tax_base[year]
+
+    # ── Сохраняем скрытые расчёты в session_state ────────────────────
+    st.session_state.va_equip_begin  = va_equip_begin
+    st.session_state.va_smr_begin    = va_smr_begin
+    st.session_state.va_pir_begin    = va_pir_begin
+    st.session_state.amo_equip       = amo_equip
+    st.session_state.amo_smr         = amo_smr
+    st.session_state.amo_pir         = amo_pir
+    st.session_state.amo_total       = {y: amo_equip[y] + amo_smr[y] + amo_pir[y] for y in years}
+    st.session_state.va_equip_end    = va_equip_end
+    st.session_state.va_smr_end      = va_smr_end
+    st.session_state.va_pir_end      = va_pir_end
+    st.session_state.residual_value  = residual
+    st.session_state.prop_tax_raw    = prop_tax
+
+    # ── Строки таблицы (постоянные цены = делим на дефлятор) ─────────
+    rows = []
+
+    row_va_equip_beg = {"Наименование статьи": "Внеоборотные активы на начало периода в рез. инв. в Оборудование"}
+    row_va_smr_beg   = {"Наименование статьи": "Внеоборотные активы на начало периода в рез. инв. в СМР"}
+    row_va_pir_beg   = {"Наименование статьи": "Прочие инвестиции"}
+
+    row_amo_equip    = {"Наименование статьи": "Амортизация с ОС в рез.инв. в Оборудование"}
+    row_amo_smr      = {"Наименование статьи": "Амортизация с ОС в рез.инв. в СМР"}
+    row_amo_pir      = {"Наименование статьи": "Амортизация с ОС в рез.инв. в ПИР"}
+    row_amo_total    = {"Наименование статьи": "Амортизационные отчисления"}
+
+    row_va_equip_end = {"Наименование статьи": "Внеоборотные активы на кон. периода в рез. инв. в Оборудование"}
+    row_va_smr_end   = {"Наименование статьи": "Внеоборотные активы на кон. периода в рез. инв. в СМР"}
+    row_va_pir_end   = {"Наименование статьи": "Прочие инвестиции на конец периода"}
+
+    row_residual     = {"Наименование статьи": "Остаточная стоимость"}
+    row_prop_tax     = {"Наименование статьи": "Налог на имущество"}
+
+    for year in years:
+        defl = deflators.get(year, 1.0) or 1.0
+
+        row_va_equip_beg[year] = va_equip_begin[year] / defl
+        row_va_smr_beg[year]   = va_smr_begin[year]   / defl
+        row_va_pir_beg[year]   = va_pir_begin[year]   / defl
+
+        row_amo_equip[year]    = amo_equip[year] / defl
+        row_amo_smr[year]      = amo_smr[year]   / defl
+        row_amo_pir[year]      = amo_pir[year]   / defl
+        row_amo_total[year]    = (amo_equip[year] + amo_smr[year] + amo_pir[year]) / defl
+
+        row_va_equip_end[year] = va_equip_end[year] / defl
+        row_va_smr_end[year]   = va_smr_end[year]   / defl
+        row_va_pir_end[year]   = va_pir_end[year]   / defl
+
+        row_residual[year]     = residual[year]   / defl
+        row_prop_tax[year]     = prop_tax[year]   / defl
+
+    rows.extend([
+        row_va_equip_beg,
+        row_va_smr_beg,
+        row_va_pir_beg,
+        row_amo_equip,
+        row_amo_smr,
+        row_amo_pir,
+        row_amo_total,
+        row_va_equip_end,
+        row_va_smr_end,
+        row_va_pir_end,
+        row_residual,
+        row_prop_tax,
+    ])
+
+    return pd.DataFrame(rows)
+
 # ========== ОСНОВНОЕ ПРИЛОЖЕНИЕ ==========
 def main():
     st.set_page_config(page_title="Инвестиционный калькулятор", layout="wide")
@@ -349,8 +1048,132 @@ def main():
             "Стальная заготовка": dict(zip(_years_p, _prices_zagotovka)),
             "Сортовой прокат": dict(zip(_years_p, _prices_sortvoy)),
         }
-        if 'residual_value_last_year' not in st.session_state:
-            st.session_state.residual_value_last_year = 4_639_210.0
+    if 'residual_value_last_year' not in st.session_state:
+        st.session_state.residual_value_last_year = 4_639_210.0
+
+    if 'cost_prices' not in st.session_state:
+        _years_cp = list(range(2016, 2036))
+
+        _prices_lom = [
+                33.7, 33.2, 31.7, 30.3, 21.7, 39.3, 22.6, 28.5,
+                22.3, 28.5, 28.5, 28.5, 28.5, 28.5, 28.5, 28.5,
+                28.5, 28.5, 28.5, 28.5
+            ]
+        _prices_gbzh = [
+                26.8, 26.4, 25.2, 24.1, 20.9, 42.9, 20.4, 26.2,
+                20.5, 26.2, 26.2, 26.2, 26.2, 26.2, 26.2, 26.2,
+                26.2, 26.2, 26.2, 26.2
+            ]
+        _prices_gaz = [
+                0.0072, 0.0071, 0.0068, 0.0065, 0.0061, 0.0057, 0.0051, 0.0047,
+                0.0047, 0.0047, 0.0047, 0.0047, 0.0047, 0.0047, 0.0047, 0.0047,
+                0.0047, 0.0047, 0.0047, 0.0047
+            ]
+        _prices_electro = [
+                6.2, 6.0, 5.8, 5.8, 5.7, 5.6, 5.4, 5.2,
+                5.6, 5.2, 5.2, 5.2, 5.2, 5.2, 5.2, 5.2,
+                5.2, 5.2, 5.2, 5.2
+            ]
+
+        st.session_state.cost_prices = {
+                "Лом и скраб": dict(zip(_years_cp, _prices_lom)),
+                "ГБЖ": dict(zip(_years_cp, _prices_gbzh)),
+                "Природный газ": dict(zip(_years_cp, _prices_gaz)),
+                "Электроэнергия": dict(zip(_years_cp, _prices_electro)),
+            }
+    if 'raw_materials' not in st.session_state:
+        st.session_state.raw_materials = ["Лом и скраб", "ГБЖ"]
+
+    if 'fuel_energy' not in st.session_state:
+        st.session_state.fuel_energy = ["Природный газ", "Электроэнергия"]
+
+    if 'cost_volumes' not in st.session_state:
+        _years_cv = list(range(2016, 2036))
+
+        _vol_lom = [
+                0.00, 0.11, 0.38, 0.62, 0.62, 0.76, 0.79, 0.83,
+                0.83, 0.80, 0.80, 0.80, 0.80, 0.80, 0.80, 0.80,
+                0.80, 0.80, 0.80, 0.80
+            ]
+        _vol_gbzh = [
+                0.000, 0.000, 0.000, 0.000, 0.000, 0.000, 0.150, 0.150,
+                0.150, 0.150, 0.150, 0.150, 0.798, 1.595, 1.595, 1.595,
+                1.595, 1.595, 1.595, 1.600
+            ]
+        _vol_gaz = [
+                0.0, 2.5, 8.7, 14.1, 14.1, 17.1, 17.7, 18.7,
+                18.7, 18.7, 18.7, 18.7, 20.8, 41.6, 41.6, 41.6,
+                41.6, 41.6, 41.6, 41.6
+            ]
+        _vol_electro = [
+                0.0, 0.1, 0.3, 0.6, 0.6, 0.7, 0.7, 0.7,
+                0.7, 0.7, 0.7, 0.7, 0.8, 1.6, 1.6, 1.6,
+                1.6, 1.6, 1.6, 1.6
+            ]
+
+        st.session_state.cost_volumes = {
+                "Лом и скраб": dict(zip(_years_cv, _vol_lom)),
+                "ГБЖ": dict(zip(_years_cv, _vol_gbzh)),
+                "Природный газ": dict(zip(_years_cv, _vol_gaz)),
+                "Электроэнергия": dict(zip(_years_cv, _vol_electro)),
+            }
+    if 'cslyab_data' not in st.session_state:
+        _years_cs = list(range(2016, 2036))
+
+        _cslyab = [
+                0, 0, 0, 0, 0, 0,
+                442, 520, 483, 394, 400, 400,
+                400, 400, 400, 400, 400, 400,
+                400, 400
+            ]
+        _dollar = [
+                0.0, 58.3, 62.7, 64.7, 72.1, 73.7,
+                68.5, 85.2, 92.5, 84.2, 84.2, 84.2,
+                84.2, 84.2, 84.2, 84.2, 84.2, 84.2,
+                84.2, 84.2
+            ]
+
+        st.session_state.cslyab_data = {
+                "ЦСЛЯБ": dict(zip(_years_cs, _cslyab)),
+                "Курс доллара": dict(zip(_years_cs, _dollar)),
+            }
+
+    if 'transport_price' not in st.session_state:
+        st.session_state.transport_price = 0.82
+
+    if 'avg_cost_structure' not in st.session_state:
+        st.session_state.avg_cost_structure = {
+                "Сырьё и материалы": 53.41,
+                "Топливо": 9.29,
+                "Энергия": 14.85,
+                "Затраты на оплату труда": 8.43,
+                "Отчисления на социальные нужды": 2.59,
+                "Амортизация основных средств": 3.58,
+                "Работы и услуги производственного характера, выполненные сторонними организациями, и приобретённые комплектующие изделия": 6.21,
+                "Прочие затраты": 1.64,
+            }
+
+    if 'excise_rate' not in st.session_state:
+        st.session_state.excise_rate = 2.7
+
+    if "fixedproductprices" not in st.session_state:
+        years_p = list(range(2016, 2036))
+
+        prices_zagotovka = [
+            0.000, 44.1, 44.1, 44.1, 44.1, 44.1, 44.1, 44.1, 44.1, 44.1,  # ← базовая цена 44.1
+            44.1, 44.1, 44.1, 44.1, 44.1, 44.1, 44.1, 44.1, 44.1, 44.1
+        ]
+        prices_sortvoy = [
+            0.000, 72.4, 72.4, 72.4, 72.4, 72.4, 72.4, 72.4, 72.4, 72.4,  # ← базовая цена 72.4
+            72.4, 72.4, 72.4, 72.4, 72.4, 72.4, 72.4, 72.4, 72.4, 72.4
+        ]
+        st.session_state["fixedproductprices"] = {
+            "Стальная заготовка": dict(zip(years_p, prices_zagotovka)),
+            "Сортовой прокат": dict(zip(years_p, prices_sortvoy)),
+        }
+
+    if "property_tax_rate" not in st.session_state:
+        st.session_state.property_tax_rate = 2
 
     # ========== САЙДБАР ДЛЯ ЗАГРУЗКИ ФАЙЛОВ ==========
     with st.sidebar:
@@ -462,36 +1285,400 @@ def main():
 
             st.rerun()
 
-    tab_input, tab_reports, tab_revenue, tab_results, tab_export = st.tabs([
+    tab_input, tab_reports, tab_revenue, tab_opex, tab_nwc, tab_invest, tab_fixed, tab_results, tab_export = st.tabs([
         "📝 Ввод данных",
         "📂 Загруженная отчетность",
         "💰 Продажи",
+        "🏭 Операционные издержки",
+        "🔄 Оборотный капитал",
+        "🏗️ Инвестиции",
+        "🏛️ Основной капитал",
         "📈 Анализ эффективности",
         "💾 Экспорт"
     ])
 
     with tab_input:
-        # ========== БЛОК 1: СТАВКИ ==========
-        st.header("Финансовые параметры")
+        # ========== БЛОК 0: ДИАПАЗОН ЛЕТ ==========
+        st.header("📅 Период расчёта")
 
         col1, col2 = st.columns(2)
         with col1:
+            start_year = st.number_input(
+                "Начальный год",
+                min_value=2000, max_value=2100, value=2016, step=1
+            )
+        with col2:
+            end_year = st.number_input(
+                "Конечный год",
+                min_value=2000, max_value=2100, value=2035, step=1
+            )
+
+        st.session_state.project_data.years = list(range(start_year, end_year + 1))
+
+        st.divider()
+
+        # ========== БЛОК 1: СТАВКИ ==========
+        st.header("Финансовые параметры")
+
+        col1, col2, col3, col4 = st.columns(4)
+
+        with col1:
             st.session_state.project_data.discount_rate = st.slider(
                 "Ставка дисконтирования (%)",
-                min_value=0.0,
-                max_value=30.0,
-                value=10.0,
+                min_value=0.0, max_value=30.0,
+                value=float(st.session_state.project_data.discount_rate * 100)
+                if st.session_state.project_data.discount_rate else 10.0,
                 step=0.1
             ) / 100
 
         with col2:
             st.session_state.project_data.tax_rate = st.slider(
                 "Ставка налога на прибыль (%)",
-                min_value=0.0,
-                max_value=30.0,
-                value=20.0,
+                min_value=0.0, max_value=30.0,
+                value=float(st.session_state.project_data.tax_rate * 100)
+                if st.session_state.project_data.tax_rate else 20.0,
                 step=0.1
             ) / 100
+
+        with col3:
+            if "excise_rate" not in st.session_state:
+                st.session_state.excise_rate = 0.0
+            st.session_state.excise_rate = st.slider(
+                "Ставка акциза (%)",
+                min_value=0.0, max_value=50.0,
+                value=st.session_state.excise_rate,
+                step=0.1
+            )
+
+        with col4:
+            if "property_tax_rate" not in st.session_state:
+                st.session_state.property_tax_rate = 2.2  # стандартная ставка в РФ
+            st.session_state.property_tax_rate = st.slider(
+                "Ставка налога на имущество (%)",
+                min_value=0.0, max_value=30.0,
+                value=float(st.session_state.property_tax_rate),
+                step=0.01
+            )
+
+        # ========== БЛОК: СТАВКА НДС (вставить сюда) ==========
+        st.subheader("📋 Ставка НДС по годам")
+
+        # Берём годы из session_state если уже заданы,
+        # иначе используем дефолтный диапазон 2024-2030
+        _years_for_vat = (
+            st.session_state.project_data.years
+            if st.session_state.project_data.years
+            else list(range(2024, 2031))
+        )
+
+        # Инициализация дефолтных значений
+        for _y in _years_for_vat:
+            if _y not in st.session_state.vat_rates:
+                st.session_state.vat_rates[_y] = 0.20  # 20% в долях
+
+        # Горизонтальная таблица
+        _vat_row = {"Показатель": "Ставка НДС (%)"}
+        for _y in _years_for_vat:
+            _vat_row[str(_y)] = round(st.session_state.vat_rates.get(_y, 0.20) * 100, 1)
+
+        _df_vat = pd.DataFrame([_vat_row])
+
+        _edited_vat = st.data_editor(
+            _df_vat,
+            key=f"vat_editor_{hash(str(_years_for_vat))}",
+            num_rows="fixed",
+            column_config={
+                "Показатель": st.column_config.TextColumn(disabled=True),
+                **{
+                    str(_y): st.column_config.NumberColumn(
+                        format="%.1f",
+                        min_value=0.0,
+                        max_value=100.0,
+                        step=0.1
+                    )
+                    for _y in _years_for_vat
+                }
+            }
+        )
+
+        # Сохраняем в session_state в долях
+        _need_vat_update = False
+        for _y in _years_for_vat:
+            _new = float(_edited_vat.iloc[0][str(_y)]) / 100
+            _old = st.session_state.vat_rates.get(_y, 0.20)
+            if abs(_new - _old) > 1e-9:
+                _need_vat_update = True
+                st.session_state.vat_rates[_y] = _new
+
+        if _need_vat_update:
+            st.rerun()
+
+        # ========== БЛОК: УСРЕДНЕННАЯ СТРУКТУРА ЗАТРАТ ==========
+        st.subheader("📊 Усредненная структура затрат")
+
+        if 'avg_cost_structure' not in st.session_state:
+            st.session_state.avg_cost_structure = {
+                "Сырьё и материалы": 0.0,
+                "Топливо": 0.0,
+                "Энергия": 0.0,
+                "Затраты на оплату труда": 0.0,
+                "Отчисления на социальные нужды": 0.0,
+                "Амортизация основных средств": 0.0,
+                "Работы и услуги производственного характера, выполненные сторонними организациями, и приобретённые комплектующие изделия": 0.0,
+                "Прочие затраты": 0.0,
+            }
+
+        _cost_structure_rows = [
+            {"Статья затрат": item, "Доля (%)": share}
+            for item, share in st.session_state.avg_cost_structure.items()
+        ]
+
+        _df_cost_structure = pd.DataFrame(_cost_structure_rows)
+
+        _edited_cost_structure = st.data_editor(
+            _df_cost_structure,
+            key="avg_cost_structure_editor",
+            num_rows="fixed",
+            column_config={
+                "Статья затрат": st.column_config.TextColumn(disabled=True),
+                "Доля (%)": st.column_config.NumberColumn(
+                    format="%.2f",
+                    min_value=0.0,
+                    max_value=100.0,
+                    step=0.01
+                )
+            },
+            use_container_width=True
+        )
+
+        # Сохраняем значения
+        _need_cs_update = False
+        for _, row in _edited_cost_structure.iterrows():
+            item = row["Статья затрат"]
+            new_val = float(row["Доля (%)"])
+            old_val = st.session_state.avg_cost_structure.get(item, 0.0)
+            if abs(new_val - old_val) > 1e-9:
+                _need_cs_update = True
+                st.session_state.avg_cost_structure[item] = new_val
+
+        # Проверка суммы
+        _total_cs = sum(st.session_state.avg_cost_structure.values())
+        if abs(_total_cs - 100.0) < 0.01:
+            st.success(f"✅ Сумма долей: {_total_cs:.2f}%")
+        else:
+            st.warning(f"⚠️ Сумма долей: {_total_cs:.2f}% (должно быть 100%)")
+
+        if _need_cs_update:
+            st.rerun()
+
+        st.divider()
+
+        st.subheader("⚙️ Операционные издержки")
+
+        # --- Сырьё и материалы ---
+        st.markdown("**🪨 Сырьё и материалы**")
+        if 'raw_materials' not in st.session_state:
+            st.session_state.raw_materials = []
+
+        col_rm1, col_rm2 = st.columns([4, 1])
+        with col_rm1:
+            new_rm = st.text_input("Добавить вид сырья/материала:", key="new_raw_material")
+        with col_rm2:
+            st.write("")
+            st.write("")
+            if st.button("➕ Добавить", key="add_rm"):
+                if new_rm and new_rm not in st.session_state.raw_materials:
+                    st.session_state.raw_materials.append(new_rm)
+                    st.rerun()
+
+        # Отображение добавленных с кнопкой удаления
+        for i, rm in enumerate(st.session_state.raw_materials):
+            col_a, col_b = st.columns([5, 1])
+            with col_a:
+                st.write(f"• {rm}")
+            with col_b:
+                if st.button("❌", key=f"del_rm_{i}"):
+                    st.session_state.raw_materials.pop(i)
+                    st.rerun()
+
+        # --- Топливо и энергия ---
+        st.markdown("**⚡ Топливо и энергия**")
+        if 'fuel_energy' not in st.session_state:
+            st.session_state.fuel_energy = []
+
+        col_fe1, col_fe2 = st.columns([4, 1])
+        with col_fe1:
+            new_fe = st.text_input("Добавить вид топлива/энергии:", key="new_fuel_energy")
+        with col_fe2:
+            st.write("")
+            st.write("")
+            if st.button("➕ Добавить", key="add_fe"):
+                if new_fe and new_fe not in st.session_state.fuel_energy:
+                    st.session_state.fuel_energy.append(new_fe)
+                    st.rerun()
+
+        for i, fe in enumerate(st.session_state.fuel_energy):
+            col_a, col_b = st.columns([5, 1])
+            with col_a:
+                st.write(f"• {fe}")
+            with col_b:
+                if st.button("❌", key=f"del_fe_{i}"):
+                    st.session_state.fuel_energy.pop(i)
+                    st.rerun()
+
+        all_cost_items = st.session_state.raw_materials + st.session_state.fuel_energy
+
+        if all_cost_items:
+            st.markdown("**💰 Цены по видам издержек по годам (руб./ед.)**")
+
+            if 'cost_prices' not in st.session_state:
+                st.session_state.cost_prices = {}
+
+            _years = st.session_state.project_data.years or list(range(2024, 2031))
+
+            # Строим DataFrame: строки = виды издержек, столбцы = годы
+            price_rows = []
+            for item in all_cost_items:
+                row = {"Вид издержки": item}
+                for year in _years:
+                    row[str(year)] = st.session_state.cost_prices.get(item, {}).get(year, 0.0)
+                price_rows.append(row)
+
+            df_cost_prices = pd.DataFrame(price_rows)
+
+            edited_cost_prices = st.data_editor(
+                df_cost_prices,
+                key=f"cost_prices_editor_{hash(str(all_cost_items))}_{hash(str(_years))}",
+                num_rows="fixed",
+                column_config={
+                    "Вид издержки": st.column_config.TextColumn(disabled=True),
+                    **{
+                        str(year): st.column_config.NumberColumn(
+                            format="%.1f",
+                            min_value=0.0,
+                            step=0.1
+                        )
+                        for year in _years
+                    }
+                }
+            )
+
+            # Сохраняем обратно в session_state
+            _need_price_update = False
+            for _, row in edited_cost_prices.iterrows():
+                item = row["Вид издержки"]
+                if item not in st.session_state.cost_prices:
+                    st.session_state.cost_prices[item] = {}
+                for year in _years:
+                    new_val = float(row[str(year)])
+                    old_val = st.session_state.cost_prices[item].get(year, 0.0)
+                    if abs(new_val - old_val) > 1e-9:
+                        _need_price_update = True
+                        st.session_state.cost_prices[item][year] = new_val
+
+            if _need_price_update:
+                st.rerun()
+
+        st.markdown("**📦 Объёмы по видам издержек и годам**")
+
+        if 'cost_volumes' not in st.session_state:
+            st.session_state.cost_volumes = {}
+
+        _years = st.session_state.project_data.years or list(range(2024, 2031))
+
+        vol_rows = []
+        for item in all_cost_items:
+            row = {"Вид издержки": item}
+            for year in _years:
+                row[str(year)] = st.session_state.cost_volumes.get(item, {}).get(year, 0.0)
+            vol_rows.append(row)
+
+        df_vol = pd.DataFrame(vol_rows)
+        edited_vol = st.data_editor(
+            df_vol,
+            key=f"cost_volumes_editor_{hash(str(all_cost_items))}_{hash(str(_years))}",
+            num_rows="fixed",
+            column_config={
+                "Вид издержки": st.column_config.TextColumn(disabled=True),
+                **{str(y): st.column_config.NumberColumn(format="%.3f", min_value=0.0, step=0.001)
+                   for y in _years}
+            }
+        )
+        for _, row in edited_vol.iterrows():
+            item = row["Вид издержки"]
+            if item not in st.session_state.cost_volumes:
+                st.session_state.cost_volumes[item] = {}
+            for year in _years:
+                st.session_state.cost_volumes[item][year] = float(row[str(year)])
+
+        st.markdown("**👷 Средняя заработная плата**")
+        if 'avg_salary' not in st.session_state:
+            st.session_state.avg_salary = 73821.0
+        st.session_state.avg_salary = st.number_input(
+            "Средняя з/п в базовый год (руб./мес.)",
+            min_value=0.0, step=1000.0,
+            value=st.session_state.avg_salary,
+            key="avg_salary_input"
+        )
+
+        st.markdown("**📋 ЦСЛЯБ и курс доллара по годам**")
+        if 'cslyab_data' not in st.session_state:
+            st.session_state.cslyab_data = {}
+
+        cslyab_rows = []
+        for label in ["ЦСЛЯБ", "Курс доллара"]:
+            row = {"Показатель": label}
+            for year in _years:
+                row[str(year)] = st.session_state.cslyab_data.get(label, {}).get(year, 0.0)
+            cslyab_rows.append(row)
+
+        df_cslyab = pd.DataFrame(cslyab_rows)
+        edited_cslyab = st.data_editor(
+            df_cslyab,
+            key=f"cslyab_editor_{hash(str(_years))}",
+            num_rows="fixed",
+            column_config={
+                "Показатель": st.column_config.TextColumn(disabled=True),
+                **{
+                    str(y): st.column_config.NumberColumn(
+                        format="%.1f",
+                        min_value=0.0,
+                        step=0.1
+                    )
+                    for y in _years
+                }
+            }
+        )
+        for _, row in edited_cslyab.iterrows():
+            label = row["Показатель"]
+            if label not in st.session_state.cslyab_data:
+                st.session_state.cslyab_data[label] = {}
+            for year in _years:
+                st.session_state.cslyab_data[label][year] = float(row[str(year)])
+
+        st.markdown("**🚛 Транспортировка**")
+        col_tr1, col_tr2 = st.columns(2)
+        with col_tr1:
+            if 'transport_price' not in st.session_state:
+                st.session_state.transport_price = 0.0
+            st.session_state.transport_price = st.number_input(
+                "Цена за транспортировку 1 тонны (руб.)",
+                min_value=0.0, step=100.0,
+                value=st.session_state.transport_price,
+                key="transport_price_input"
+            )
+        with col_tr2:
+            transport_options = st.session_state.raw_materials + st.session_state.fuel_energy
+            if transport_options:
+                if 'transport_product' not in st.session_state:
+                    st.session_state.transport_product = transport_options[0]
+                st.session_state.transport_product = st.selectbox(
+                    "Продукция для транспортировки",
+                    options=transport_options,
+                    key="transport_product_select"
+                )
+            else:
+                st.info("Сначала добавьте виды сырья или топлива")
 
         # ========== БЛОК 2: РАСПРЕДЕЛЕНИЕ ИНВЕСТИЦИЙ И АМОРТИЗАЦИЯ ==========
         st.subheader("Распределение инвестиций и амортизация")
@@ -499,64 +1686,62 @@ def main():
         col_left, col_center, col_right = st.columns([1, 1, 1])
 
         with col_left:
-            # Доля оборудования (вводит пользователь)
             equipment_share_pct = st.number_input(
                 "Доля оборудования (%)",
-                min_value=0.0,
-                max_value=100.0,
-                value=60.0,
-                step=1.0
+                min_value=0.0, max_value=100.0, value=56.2, step=1.0
             )
             st.session_state.project_data.equipment_share = equipment_share_pct / 100
 
-            # Норма амортизации оборудования
             equipment_dep_pct = st.slider(
                 "Норма амортизации оборудования (%)",
-                min_value=0.0,
-                max_value=50.0,
-                value=15.0,
-                step=0.1
+                min_value=0.0, max_value=50.0, value=15.0, step=0.1
             )
             st.session_state.project_data.equipment_depreciation = equipment_dep_pct / 100
 
+            # ✅ Новый параметр
+            pir_share_pct = st.number_input(
+                "Доля ПИР, %",
+                min_value=0.0, max_value=100.0,
+                value=0.405,
+                step=0.001,
+                format="%.3f"
+            )
+            st.session_state.pir_share_pct = pir_share_pct
+
         with col_center:
-            # Круговая диаграмма
-            construction_share = 100 - equipment_share_pct
+            construction_share = 100 - equipment_share_pct - pir_share_pct
+
+            # ✅ Три сегмента вместо двух
             fig_pie = go.Figure(data=[go.Pie(
-                labels=['Оборудование', 'Строительно-монтажные работы'],
-                values=[equipment_share_pct, construction_share],
+                labels=['Оборудование', 'Строительно-монтажные работы', 'Проектно-изыскательные работы'],
+                values=[
+                    max(equipment_share_pct, 0),
+                    max(construction_share, 0),
+                    max(pir_share_pct, 0)
+                ],
                 hole=0.4,
-                marker_colors=['#1f77b4', '#ff7f0e']
+                marker_colors=['#1f77b4', '#ff7f0e', '#2ca02c']
             )])
             fig_pie.update_layout(title="Распределение инвестиций", height=300)
             st.plotly_chart(fig_pie, use_container_width=True)
 
         with col_right:
-            # Доля СМР (рассчитывается автоматически)
+            # ✅ СМР рассчитывается как остаток
+            construction_share = 100 - equipment_share_pct - pir_share_pct
+
             st.text_input(
                 "Доля строительно-монтажных работ (%)",
                 value=f"{construction_share:.1f}",
                 disabled=True
             )
+            if construction_share < 0:
+                st.error("⚠️ Сумма долей превышает 100%")
 
-            # Норма амортизации СМР
             construction_dep_pct = st.slider(
                 "Норма амортизации СМР (%)",
-                min_value=0.0,
-                max_value=50.0,
-                value=5.0,
-                step=0.1
+                min_value=0.0, max_value=50.0, value=2.5, step=0.1
             )
             st.session_state.project_data.construction_depreciation = construction_dep_pct / 100
-
-        # ========== БЛОК 3: ДИАПАЗОН ЛЕТ ==========
-        col1, col2 = st.columns(2)
-        with col1:
-            start_year = st.number_input("Начальный год", min_value=2000, max_value=2100, value=2024, step=1)
-        with col2:
-            end_year = st.number_input("Конечный год", min_value=2000, max_value=2100, value=2030, step=1)
-
-        st.session_state.project_data.years = list(range(start_year, end_year + 1))
 
         # ========== БЛОК 4: ВЫБОР ПРОДУКЦИИ И ОБЪЕМОВ ==========
         st.subheader("📦 Выбор продукции и объемов")
@@ -1018,119 +2203,13 @@ def main():
             else:
                 st.info("Файл ОДДС пока не загружен.")
 
-    with tab_revenue:
-        st.subheader("📊 Таблица продаж")
-
-        years = st.session_state.project_data.years
-
-        if not years:
-            st.warning("Сначала задайте диапазон лет во вкладке 'Ввод данных'")
-        else:
-            # ---------- 1. Ввод НДС ----------
-            st.subheader("НДС по годам")
-
-            if 'vat_rates' not in st.session_state:
-                st.session_state.vat_rates = {year: 0.20 for year in years}
-
-            vat_data = []
-            for year in years:
-                vat_data.append({
-                    "Год": year,
-                    "Ставка НДС (%)": st.session_state.vat_rates.get(year, 0.20) * 100
-                })
-
-            df_vat = pd.DataFrame(vat_data)
-
-            edited_vat = st.data_editor(
-                df_vat,
-                key="vat_editor",
-                num_rows="fixed",
-                column_config={
-                    "Год": st.column_config.NumberColumn(disabled=True),
-                    "Ставка НДС (%)": st.column_config.NumberColumn(
-                        format="%.2f",
-                        min_value=0.0,
-                        max_value=100.0,
-                        step=0.1
-                    )
-                }
-            )
-
-            for _, row in edited_vat.iterrows():
-                year = int(row["Год"])
-                st.session_state.vat_rates[year] = float(row["Ставка НДС (%)"]) / 100
-
-            st.divider()
-
-            # ---------- 2. Данные из отчетности ----------
-            st.subheader("Данные из отчетности")
-
-            # --- Автопарсинг из загруженных файлов ---
-            def extract_row_by_code(file, code):
-                """Читает строку из Excel по коду и возвращает {год: значение}"""
-                if file is None:
-                    return {}
-                try:
-                    file.seek(0)
-                    df = pd.read_excel(file, header=None)
-                    df = df.dropna(how="all").dropna(axis=1, how="all").reset_index(drop=True)
-
-                    # Ищем строку с нужным кодом
-                    code_row_idx = None
-                    code_col_idx = None
-                    for i in range(len(df)):
-                        for j in range(len(df.columns)):
-                            cell = str(df.iloc[i, j]).strip().split(".")[0]
-                            if cell == str(code):
-                                code_row_idx = i
-                                code_col_idx = j
-                                break
-                        if code_row_idx is not None:
-                            break
-
-                    if code_row_idx is None:
-                        return {}
-
-                    # Ищем строку с годами выше
-                    header_row_idx = None
-                    for i in range(code_row_idx - 1, -1, -1):
-                        row_vals = [str(v).strip().split(".")[0] for v in df.iloc[i].tolist()]
-                        years_found = [int(v) for v in row_vals if v.isdigit() and 2000 <= int(v) <= 2100]
-                        if len(years_found) >= 2:
-                            header_row_idx = i
-                            break
-
-                    if header_row_idx is None:
-                        return {}
-
-                    header = df.iloc[header_row_idx].tolist()
-                    values = df.iloc[code_row_idx].tolist()
-
-                    result = {}
-                    for col_idx, h in enumerate(header):
-                        try:
-                            h_str = str(h).strip().split(".")[0]
-                            if h_str.isdigit():
-                                year = int(h_str)
-                                if 2000 <= year <= 2100:
-                                    val = values[col_idx]
-                                    if pd.isna(val):
-                                        val = 0.0
-                                    result[year] = float(str(val).replace(",", "").replace(" ", ""))
-                        except:
-                            continue
-                    return result
-                except Exception as e:
-                    st.caption(f"Ошибка чтения кода {code}: {e}")
-                    return {}
-
             # Получаем файлы из session_state
             income_file = st.session_state.get("income_file")
             cash_flow_file = st.session_state.get("cash_flow_file")
 
             # Парсим нужные строки
-            revenue_2110_from_file = extract_row_by_code(income_file, 2110)
-            receipts_4112_from_file = extract_row_by_code(cash_flow_file, 4112)
+            revenue_2110_from_file = extract_row_by_code(st.session_state.get('income_df'), 2110)
+            receipts_4112_from_file = extract_row_by_code(st.session_state.get('cash_flow_df'), 4112)
 
             # Инициализируем session_state и сразу заполняем из файлов
             if 'revenue_without_vat' not in st.session_state:
@@ -1139,7 +2218,11 @@ def main():
                 st.session_state.other_operating_receipts = {}
 
             # Записываем данные из файлов для лет, которые в них есть
-            for year in years:
+            _years = st.session_state.project_data.years
+            if not _years:
+                _years = list(range(2024, 2031))
+
+            for year in _years:
                 if year in revenue_2110_from_file:
                     st.session_state.revenue_without_vat[year] = revenue_2110_from_file[year]
                 elif year not in st.session_state.revenue_without_vat:
@@ -1150,75 +2233,337 @@ def main():
                 elif year not in st.session_state.other_operating_receipts:
                     st.session_state.other_operating_receipts[year] = 0.0
 
-            # Таблица — заполнена из файлов, можно скорректировать вручную
             report_data = []
-            for year in years:
+            for year in _years:
                 report_data.append({
                     "Год": year,
                     "Выручка без НДС (2110)": st.session_state.revenue_without_vat.get(year, 0.0),
                     "Прочие поступления от операций": st.session_state.other_operating_receipts.get(year, 0.0),
                 })
 
-            df_report = pd.DataFrame(report_data)
+            if report_data:
+                df_report = pd.DataFrame(report_data)
+                edited_report = st.data_editor(
+                    df_report,
+                    key="report_editor",
+                    num_rows="fixed",
+                    column_config={
+                        "Год": st.column_config.NumberColumn(disabled=True),
+                        "Выручка без НДС (2110)": st.column_config.NumberColumn(format="%.2f"),
+                        "Прочие поступления от операций": st.column_config.NumberColumn(format="%.2f"),
+                    }
+                )
 
-            edited_report = st.data_editor(
-                df_report,
-                key="report_editor",
-                num_rows="fixed",
-                column_config={
-                    "Год": st.column_config.NumberColumn(disabled=True),
-                    "Выручка без НДС (2110)": st.column_config.NumberColumn(
-                        format="%.2f", min_value=0.0, step=1000.0
-                    ),
-                    "Прочие поступления от операций": st.column_config.NumberColumn(
-                        format="%.2f", min_value=0.0, step=1000.0
-                    ),
-                }
+                # ✅ Цикл теперь тоже внутри if — edited_report гарантированно существует
+                for _, row in edited_report.iterrows():
+                    year = int(row["Год"])
+                    st.session_state.revenue_without_vat[year] = float(row["Выручка без НДС (2110)"])
+                    st.session_state.other_operating_receipts[year] = float(row["Прочие поступления от операций"])
+            else:
+                st.info("Нет данных для отображения. Загрузите файлы отчётности в сайдбаре.")
+
+    with tab_revenue:  # ← этого блока нет, нужно добавить
+        st.header("💰 Продажи")
+
+        if not st.session_state.project_data.years:
+            st.warning("Сначала укажите диапазон лет во вкладке 'Ввод данных'")
+        elif not st.session_state.project_data.products:
+            st.warning("Сначала добавьте продукты во вкладке 'Ввод данных'")
+        else:
+            current_indices = st.session_state.price_indices_temp.copy() \
+                if 'price_indices_temp' in st.session_state else {}
+
+            deflators = {
+                year: calculate_deflator(year, st.session_state.base_year, current_indices)
+                for year in st.session_state.project_data.years
+            }
+
+            last_year = st.session_state.project_data.years[-1]
+            liquidation_by_year = {year: 0.0 for year in st.session_state.project_data.years}
+            liquidation_by_year[last_year] = (
+                    st.session_state.get("increment_nwc_last_year", 0.0) +
+                    st.session_state.get("residual_value_last_year", 0.0)
             )
 
-            for _, row in edited_report.iterrows():
-                year = int(row["Год"])
-                st.session_state.revenue_without_vat[year] = float(row["Выручка без НДС (2110)"])
-                st.session_state.other_operating_receipts[year] = float(row["Прочие поступления от операций"])
+            sales_matrix_df = build_sales_matrix(
+                project_data=st.session_state.project_data,
+                years=st.session_state.project_data.years,
+                deflators=deflators,
+                vat_rates=st.session_state.vat_rates,
+                other_operating_receipts=st.session_state.other_operating_receipts,
+                liquidation_by_year=liquidation_by_year,
+                revenue_without_vat_report=st.session_state.revenue_without_vat,
+                product_base_prices=st.session_state.product_base_prices
+            )
 
+            st.session_state.sales_matrix_df = sales_matrix_df
 
-        current_indices = st.session_state.price_indices_temp.copy() if 'price_indices_temp' in st.session_state else {}
-        deflators = {
-            year: calculate_deflator(year, st.session_state.base_year, current_indices)
-            for year in st.session_state.project_data.years
-        }
+            format_dict = {year: "{:,.2f}" for year in st.session_state.project_data.years}
 
-        liquidation_by_year = {year: 0.0 for year in st.session_state.project_data.years}
-        last_year = st.session_state.project_data.years[-1]
-        liquidation_by_year[last_year] = (
-                st.session_state.get("increment_nwc_last_year", 0.0) +
-                st.session_state.get("residual_value_last_year", 0.0)
-        )
+            st.dataframe(
+                sales_matrix_df.style.format(format_dict),
+                use_container_width=True,
+                hide_index=True
+            )
 
-        sales_matrix_df = build_sales_matrix(
-            project_data=st.session_state.project_data,
-            years=st.session_state.project_data.years,
-            deflators=deflators,
-            vat_rates=st.session_state.vat_rates,
-            other_operating_receipts=st.session_state.other_operating_receipts,
-            liquidation_by_year=liquidation_by_year,
-            revenue_without_vat_report=st.session_state.revenue_without_vat,
-            product_base_prices=st.session_state.product_base_prices
-        )
+    with tab_opex:
+        st.header("🏭 Операционные издержки")
 
-        st.session_state.sales_matrix_df = sales_matrix_df
+        if not st.session_state.project_data.years:
+            st.warning("Сначала укажите диапазон лет во вкладке 'Ввод данных'")
+        elif not st.session_state.get('cost_prices'):
+            st.warning("Сначала заполните данные по издержкам во вкладке 'Ввод данных'")
+        else:
+            _years = st.session_state.project_data.years
 
-        format_dict = {}
-        for year in st.session_state.project_data.years:
-            format_dict[year] = "{:,.7f}"
+            current_indices = st.session_state.price_indices_temp.copy() \
+                if 'price_indices_temp' in st.session_state else {}
+            deflators = {
+                year: calculate_deflator(year, st.session_state.base_year, current_indices)
+                for year in _years
+            }
 
-        st.dataframe(
-            sales_matrix_df.style.format(format_dict),
-            use_container_width=True,
-            hide_index=True
-        )
+            # Доли инвестиций
+            _eq_share = st.session_state.project_data.equipment_share
+            _pir_share = st.session_state.get('pir_share_pct', 0.0) / 100.0
+            _con_share = 1.0 - _eq_share - _pir_share
 
+            opex_df = build_opex_matrix(
+                project_data=st.session_state.project_data,
+                years=_years,
+                deflators=deflators,
+                vat_rates=st.session_state.vat_rates,
+                cost_prices=st.session_state.cost_prices,
+                cost_volumes=st.session_state.cost_volumes,
+                avg_cost_structure=st.session_state.avg_cost_structure,
+                avg_salary=st.session_state.avg_salary,
+                cslyab_data=st.session_state.cslyab_data,
+                transport_price=st.session_state.get('transport_price', 0.0),
+                transport_product=st.session_state.get('transport_product', None),
+                cash_flow_df=st.session_state.get('cash_flow_df'),
+                income_df=st.session_state.get('income_df'),
+                equipment_share=_eq_share,
+                construction_share=_con_share,
+                pir_share=_pir_share,
+                equipment_dep=st.session_state.project_data.equipment_depreciation,
+                construction_dep=st.session_state.project_data.construction_depreciation,
+            )
 
+            format_dict = {year: "{:,.2f}" for year in _years}
+            st.dataframe(
+                opex_df.style.format(format_dict),
+                use_container_width=True,
+                hide_index=True
+            )
+
+    with tab_nwc:
+        st.header("🔄 Оборотный капитал")
+
+        balance_df = st.session_state.get("balance_df")
+        _years = st.session_state.project_data.years
+
+        if balance_df is None:
+            st.info("Загрузите бухгалтерский баланс в сайдбаре для расчёта оборотного капитала.")
+        elif not _years:
+            st.warning("Сначала укажите диапазон лет во вкладке 'Ввод данных'.")
+        else:
+            result = build_nwc_matrix(balance_df, _years)
+
+            # build_nwc_matrix возвращает либо пустой DataFrame, либо (df, reported_years)
+            if isinstance(result, tuple):
+                nwc_df, reported_years = result
+            else:
+                nwc_df = result
+                reported_years = []
+
+            if nwc_df.empty:
+                st.warning(
+                    "Не удалось извлечь данные баланса. "
+                    "Проверьте, что файл содержит строки с кодами 1210, 1230, 1220, "
+                    "1250, 1260, 1420, 1430, 1450."
+                )
+            else:
+                # Сохраняем в session_state для использования в других блоках
+                st.session_state.nwc_df = nwc_df
+                st.session_state.reported_years_nwc = reported_years
+
+                format_dict = {year: "{:,.2f}" for year in reported_years}
+
+                st.dataframe(
+                    nwc_df.style.format(format_dict, na_rep=""),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+                # Визуализация динамики ЧОК
+                nwc_row = nwc_df[nwc_df["Наименование статьи"] == "Чистый оборотный капитал"]
+                if not nwc_row.empty:
+                    nwc_values = [nwc_row.iloc[0].get(y, 0.0) for y in reported_years]
+
+                    fig_nwc = go.Figure()
+                    fig_nwc.add_trace(go.Bar(
+                        x=reported_years,
+                        y=nwc_values,
+                        name="ЧОК",
+                        marker_color=[
+                            "#1f77b4" if v >= 0 else "#d62728"
+                            for v in nwc_values
+                        ]
+                    ))
+                    fig_nwc.add_hline(y=0, line_dash="dash", line_color="gray")
+                    fig_nwc.update_layout(
+                        title="Динамика чистого оборотного капитала",
+                        xaxis_title="Год",
+                        yaxis_title="Тыс. руб.",
+                        height=350,
+                    )
+                    st.plotly_chart(fig_nwc, use_container_width=True)
+
+    with tab_invest:
+        st.header("🏗️ Инвестиции")
+
+        cash_flow_df = st.session_state.get("cash_flow_df")
+        _years = st.session_state.project_data.years
+
+        if cash_flow_df is None:
+            st.info("Загрузите ОДДС в сайдбаре для расчёта блока инвестиций.")
+        elif not _years:
+            st.warning("Сначала укажите диапазон лет во вкладке 'Ввод данных'.")
+        else:
+            currentindices = st.session_state.price_indices_temp.copy() \
+                if "price_indices_temp" in st.session_state else {}
+            deflators = {
+                year: calculate_deflator(year, st.session_state.base_year, currentindices)
+                for year in _years
+            }
+
+            eq_share = st.session_state.project_data.equipment_share
+            pir_share = st.session_state.get("pir_share_pct", 0.0) / 100.0
+            con_share = 1.0 - eq_share - pir_share
+
+            invest_df = build_invest_matrix(
+                cash_flow_df=cash_flow_df,
+                years=_years,
+                deflators=deflators,
+                vat_rates=st.session_state.vat_rates,
+                equipment_share=eq_share,
+                construction_share=con_share,
+                pir_share=pir_share,
+            )
+
+            st.session_state.invest_df = invest_df
+
+            format_dict = {year: "{:,.2f}" for year in _years}
+
+            st.dataframe(
+                invest_df.style.format(format_dict, na_rep=""),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+            # ── Визуализация структуры инвестиций ──────────────────────
+            equip_row = invest_df[invest_df["Наименование статьи"] == "Оборудование"]
+            smr_row = invest_df[invest_df["Наименование статьи"] == "Строительно-монтажные работы"]
+            pir_row = invest_df[invest_df["Наименование статьи"] == "Прочие инвестиции"]
+
+            if not equip_row.empty:
+                equip_vals = [equip_row.iloc[0].get(y, 0.0) or 0.0 for y in _years]
+                smr_vals = [smr_row.iloc[0].get(y, 0.0) or 0.0 for y in _years]
+                pir_vals = [pir_row.iloc[0].get(y, 0.0) or 0.0 for y in _years]
+
+                fig_inv = go.Figure()
+                fig_inv.add_trace(go.Bar(x=_years, y=equip_vals, name="Оборудование"))
+                fig_inv.add_trace(go.Bar(x=_years, y=smr_vals, name="СМР"))
+                fig_inv.add_trace(go.Bar(x=_years, y=pir_vals, name="Прочие (ПИР)"))
+                fig_inv.update_layout(
+                    barmode="stack",
+                    title="Структура инвестиций во внеоборотные активы (постоянные цены)",
+                    xaxis_title="Год",
+                    yaxis_title="Тыс. руб.",
+                    height=380,
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                )
+                st.plotly_chart(fig_inv, use_container_width=True)
+
+    with tab_fixed:
+        st.header("🏛️ Основной капитал")
+
+        _years = st.session_state.project_data.years
+        inv_equip_raw = st.session_state.get("inv_equip_raw")
+        inv_smr_raw = st.session_state.get("inv_smr_raw")
+        inv_pir_raw = st.session_state.get("inv_pir_raw")
+
+        if not _years:
+            st.warning("Сначала укажите диапазон лет во вкладке 'Ввод данных'.")
+        elif inv_equip_raw is None:
+            st.info("Сначала откройте вкладку '🏗️ Инвестиции' — данные рассчитаются автоматически.")
+        else:
+            currentindices = st.session_state.price_indices_temp.copy() \
+                if "price_indices_temp" in st.session_state else {}
+            deflators = {
+                year: calculate_deflator(year, st.session_state.base_year, currentindices)
+                for year in _years
+            }
+
+            fixed_df = build_fixed_assets_matrix(
+                years=_years,
+                deflators=deflators,
+                vat_rates=st.session_state.vat_rates,
+                inv_equip_raw=inv_equip_raw,
+                inv_smr_raw=inv_smr_raw,
+                inv_pir_raw=inv_pir_raw,
+                equipment_dep=st.session_state.project_data.equipment_depreciation,
+                construction_dep=st.session_state.project_data.construction_depreciation,
+                property_tax_rate=st.session_state.get("property_tax_rate", 2.2),
+            )
+
+            st.session_state.fixed_assets_df = fixed_df
+
+            format_dict = {year: "{:,.2f}" for year in _years}
+
+            st.dataframe(
+                fixed_df.style.format(format_dict, na_rep=""),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+            # ── Визуализация остаточной стоимости и амортизации ──────────
+            res_row = fixed_df[fixed_df["Наименование статьи"] == "Остаточная стоимость"]
+            amo_row = fixed_df[fixed_df["Наименование статьи"] == "Амортизационные отчисления"]
+            tax_row = fixed_df[fixed_df["Наименование статьи"] == "Налог на имущество"]
+
+            if not res_row.empty:
+                res_vals = [res_row.iloc[0].get(y, 0.0) or 0.0 for y in _years]
+                amo_vals = [amo_row.iloc[0].get(y, 0.0) or 0.0 for y in _years]
+                tax_vals = [tax_row.iloc[0].get(y, 0.0) or 0.0 for y in _years]
+
+                fig_fa = go.Figure()
+                fig_fa.add_trace(go.Bar(
+                    x=_years, y=res_vals, name="Остаточная стоимость",
+                    marker_color="#1f77b4"
+                ))
+                fig_fa.add_trace(go.Scatter(
+                    x=_years, y=amo_vals, name="Амортизация",
+                    mode="lines+markers", yaxis="y2",
+                    line=dict(color="#ff7f0e", width=2)
+                ))
+                fig_fa.add_trace(go.Scatter(
+                    x=_years, y=tax_vals, name="Налог на имущество",
+                    mode="lines+markers", yaxis="y2",
+                    line=dict(color="#d62728", width=2, dash="dot")
+                ))
+                fig_fa.update_layout(
+                    title="Остаточная стоимость, амортизация и налог на имущество",
+                    xaxis_title="Год",
+                    yaxis=dict(title="Остаточная стоимость, тыс. руб."),
+                    yaxis2=dict(
+                        title="Амортизация / Налог, тыс. руб.",
+                        overlaying="y", side="right"
+                    ),
+                    height=400,
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                )
+                st.plotly_chart(fig_fa, use_container_width=True)
 
     with tab_results:
         st.header("Анализ эффективности инвестиций")
