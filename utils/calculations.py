@@ -1,76 +1,82 @@
 """
 Финансовые расчёты: NPV, IRR, срок окупаемости, выручка, дефлятор.
 """
+import streamlit as st
+
+def calc_npv(cashflows: list[float], rate: float) -> float:
+    """NPV: CF_n / (1+r)^n, n=1,2,..."""
+    if rate == 0.0:
+        return sum(cashflows)
+    return sum(cf / (1 + rate) ** (i + 1) for i, cf in enumerate(cashflows))
 
 
-def calculate_npv(cash_flows, discount_rate):
-    """Расчет чистой приведенной стоимости"""
-    npv = 0
-    years = sorted(cash_flows.keys())
-    for i, year in enumerate(years):
-        npv += cash_flows[year] / ((1 + discount_rate) ** i)
-    return npv
+def calc_irr(cashflows: list[float]) -> float:
+    def npv_r(r):
+        return sum(cf / (1 + r) ** (i + 1) for i, cf in enumerate(cashflows))
+
+    has_negative = any(cf < 0 for cf in cashflows)
+    has_positive = any(cf > 0 for cf in cashflows)
+    if not has_negative or not has_positive:
+        return float("nan")
+
+    # Динамический поиск границ
+    lo = 1e-6
+    hi = None
+
+    # Ищем hi где NPV < 0, пробуем широкий диапазон
+    for candidate in [0.5, 1.0, 2.0, 5.0, 10.0, 50.0, 100.0, 500.0, 1000.0, 5000.0]:
+        if npv_r(candidate) < 0:
+            hi = candidate
+            break
+
+    # Если NPV везде >= 0 — IRR не существует
+    if hi is None:
+        return float("nan")
+
+    # Уточняем lo — ищем где NPV > 0
+    for candidate in [1e-6, 0.01, 0.05, 0.1, 0.5, 1.0]:
+        if candidate < hi and npv_r(candidate) > 0:
+            lo = candidate
+            break
+
+    try:
+        for _ in range(3000):
+            mid = (lo + hi) / 2
+            val = npv_r(mid)
+            if val > 0:
+                lo = mid
+            else:
+                hi = mid
+            if hi - lo < 1e-9:
+                break
+
+        result = (lo + hi) / 2 * 100
+        return result if result < 1_000_000 else float("nan")
+
+    except Exception:
+        return float("nan")
+
+def calc_payback(cashflows: list[float]) -> float:
+    """Простой срок окупаемости (лет)."""
+    cum = 0.0
+    for i, cf in enumerate(cashflows):
+        prev = cum
+        cum += cf
+        if prev < 0 <= cum:
+            return i + (-prev / (cum - prev))
+    return float("inf")
 
 
-def calculate_irr(cash_flows, max_iterations=100):
-    """Расчет внутренней нормы доходности"""
-    def npv(rate):
-        return calculate_npv(cash_flows, rate)
-
-    low, high = -0.5, 1.0
-    for _ in range(max_iterations):
-        mid = (low + high) / 2
-        if npv(mid) > 0:
-            low = mid
-        else:
-            high = mid
-        if abs(high - low) < 0.0001:
-            return mid
-    return (low + high) / 2
-
-
-def calculate_payback_period(cash_flows, initial_investment):
-    """Расчет срока окупаемости"""
-    cumulative = 0
-    years = sorted(cash_flows.keys())
-
-    for i, year in enumerate(years):
-        cumulative += cash_flows[year]
-        if cumulative >= initial_investment:
-            if i == 0:
-                return 1
-            prev_cumulative = cumulative - cash_flows[year]
-            return i + (initial_investment - prev_cumulative) / cash_flows[year]
-    return float('inf')
-
-
-def calculate_revenue(volumes_by_product, prices, export_shares, import_shares, years):
-    """Расчет выручки"""
-    results = {
-        'total_revenue': {year: 0 for year in years},
-        'export_revenue': {year: 0 for year in years},
-        'domestic_revenue': {year: 0 for year in years},
-        'export_volume': {year: 0 for year in years},
-        'domestic_volume': {year: 0 for year in years},
-    }
-
-    for product in volumes_by_product:
-        for year in years:
-            volume = volumes_by_product[product].get(year, 0)
-            price = prices.get(year, 0)
-            export_share = export_shares.get(product, {}).get(year, 0)
-            import_share = import_shares.get(product, {}).get(year, 0)
-
-            export_vol = volume * export_share
-            domestic_vol = volume * import_share
-
-            results['export_volume'][year] += export_vol
-            results['domestic_volume'][year] += domestic_vol
-            results['export_revenue'][year] += export_vol * price
-            results['domestic_revenue'][year] += domestic_vol * price * 1.2
-            results['total_revenue'][year] += volume * price
-
-    return results
+def calc_dpayback(cashflows: list[float], rate: float) -> float:
+    """Дисконтированный срок окупаемости (лет)."""
+    cum = 0.0
+    for i, cf in enumerate(cashflows):
+        prev = cum
+        dcf = cf / (1 + rate) ** (i + 1) if rate != 0 else cf
+        cum += dcf
+        if prev < 0 <= cum:
+            return i + (-prev / (cum - prev))
+    return float("inf")
 
 
 def calculate_deflator(year, base_year, price_indices):

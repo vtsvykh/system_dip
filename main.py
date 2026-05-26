@@ -10,13 +10,7 @@ import streamlit as st
 from data.okpd_catalog import ALL_UNITS, DEFAULT_UNITS, OKPD_CATALOG
 from data.product_types import PRODUCT_TYPES_MAPPING
 from models.project_data import ProjectData
-from utils.calculations import (
-    calculate_deflator,
-    calculate_irr,
-    calculate_npv,
-    calculate_payback_period,
-    calculate_revenue,
-)
+from utils.calculations import calc_npv, calc_irr, calc_payback, calc_dpayback, calculate_deflator
 from utils.excel_export import create_excel_report
 
 def read_uploaded_excel(uploaded_file):
@@ -4654,6 +4648,8 @@ def main():
                 discount_rate=discount_rate,
             )
 
+
+
             st.session_state.soc_eff_project_df = soc_pr_df
 
             # ── Стилизация ─────────────────────────────────────────────────
@@ -4726,88 +4722,201 @@ def main():
             st.plotly_chart(fig_pr, use_container_width=True)
 
     with tab_results:
-        st.header("Анализ эффективности инвестиций")
+        st.header("📈 Анализ эффективности проекта")
 
-        if st.session_state.revenue_data:
-            st.subheader("Инвестиционные затраты")
-            total_investment = st.number_input("Общие инвестиции (руб.)", value=10000000, step=1000000)
+        years = st.session_state.project_data.years
+        soc_pr_df = st.session_state.get("soc_eff_project_df")
 
-            equipment_invest = total_investment * st.session_state.project_data.equipment_share
-            construction_invest = total_investment * (1 - st.session_state.project_data.equipment_share)
+        dr = st.session_state.project_data.discount_rate or 0.179  # доля: 0.179
+        dr_pct = dr * 100  # проценты для отображения: 17.9
+        if not years:
+            st.warning("Укажите диапазон лет во вкладке '📝 Ввод данных'.")
+            st.stop()
 
-            col1, col2 = st.columns(2)
-            with col1:
-                st.metric("Инвестиции в оборудование", f"{equipment_invest:,.0f} руб.")
-                st.metric("Амортизация оборудования",
-                          f"{equipment_invest * st.session_state.project_data.equipment_depreciation:,.0f} руб./год")
-            with col2:
-                st.metric("Инвестиции в СМР", f"{construction_invest:,.0f} руб.")
-                st.metric("Амортизация СМР",
-                          f"{construction_invest * st.session_state.project_data.construction_depreciation:,.0f} руб./год")
+        if soc_pr_df is None:
+            st.info("Сначала откройте вкладку '🌍 ДП Общ. эфф. (проект)' — данные ещё не рассчитаны.")
+            st.stop()
 
-            st.subheader("Денежные потоки")
-            operating_costs_pct = st.slider("Операционные расходы (% от выручки)", 0, 100, 60) / 100
+        sy = sorted(years)
 
-            cash_flows = {}
-            for year in st.session_state.project_data.years:
-                revenue = st.session_state.revenue_data['total_revenue'][year]
-                costs = revenue * operating_costs_pct
+        # ── Вспомогательные функции ───────────────────────────────────
+        def get_cf_list(df, row_name: str) -> list[float]:
+            rows = df[df["Наименование статьи"] == row_name]
+            if rows.empty:
+                return [0.0] * len(sy)
+            row = rows.iloc[0]
+            return [float(row.get(y, 0.0) or 0.0) for y in sy]
 
-                depreciation = (equipment_invest * st.session_state.project_data.equipment_depreciation +
-                                construction_invest * st.session_state.project_data.construction_depreciation)
+        def fmt(v, suffix="", decimals=2):
+            if v == float("inf") or v == float("-inf"):
+                return "не окупается"
+            if v != v:
+                return "—"
+            return f"{v:,.{decimals}f}{suffix}"
 
-                ebit = revenue - costs - depreciation
-                tax = max(0, ebit * st.session_state.project_data.tax_rate)
-                net_income = ebit - tax
+        # ← ПЕРЕМЕЩЕНА СЮДА — до любого использования
+        def cum_series(cf_list, rate):
+            result, acc = [], 0.0
+            for i, cf in enumerate(cf_list):
+                acc += cf / (1 + rate) ** (i + 1) if rate != 0 else cf
+                result.append(acc)
+            return result
 
-                operating_cf = net_income + depreciation
-                investment = total_investment if year == st.session_state.project_data.years[0] else 0
+        def make_rows(scenarios_list):
+            result = []
+            for label, cf, rate, rate_lbl in scenarios_list:
+                inv = abs(sum(v for v in cf if v < 0)) or 1.0
+                npv = calc_npv(cf, rate)
+                pi = 1 + npv / inv
+                result.append({
+                    "Вариант": label,
+                    "Ставка": rate_lbl,
+                    "NPV, тыс. руб.": fmt(npv, decimals=0),
+                    "IRR, %": fmt(calc_irr(cf)),
+                    "Срок окупаемости, лет": fmt(calc_payback(cf))
+                })
+            return result
 
-                cash_flows[year] = operating_cf - investment
+        # ── Данные ────────────────────────────────────────────────────
+        cf_no_gp = get_cf_list(soc_pr_df, "ДП коммерческой эффективности без ГП")
+        cf_with_gp = get_cf_list(soc_pr_df, "ДП коммерческой эффективности с ГП")
+        # Без дисконтирования — для IRR, срока окупаемости, NPV при 0%
+        cf_soc = get_cf_list(soc_pr_df, "Сальдо ДП для расчета общественной эффективности (без дисконтирования)")
 
-            st.session_state.cash_flows = cash_flows
 
-            cf_df = pd.DataFrame(
-                [{'Год': y, 'Денежный поток': cash_flows[y]} for y in st.session_state.project_data.years])
-            st.dataframe(cf_df.style.format({'Денежный поток': '{:,.0f} руб.'}))
 
-            npv = calculate_npv(cash_flows, st.session_state.project_data.discount_rate)
-            irr = calculate_irr(cash_flows)
-            payback = calculate_payback_period(cash_flows, total_investment)
+        # ══════════════════════════════════════════════════════════════
+        # КОММЕРЧЕСКАЯ ЭФФЕКТИВНОСТЬ
+        # ══════════════════════════════════════════════════════════════
+        st.markdown("## Коммерческая эффективность")
 
-            st.session_state.npv = npv
-            st.session_state.irr = irr
-            st.session_state.payback = payback
+        comm_scenarios = [
+            ("Без ГП", cf_no_gp, dr, f"{dr_pct:.2f}%"),
+            ("Без ГП", cf_no_gp, 0.0, "0%"),
+            ("С ГП", cf_with_gp, dr, f"{dr_pct:.2f}%"),
+            ("С ГП", cf_with_gp, 0.0, "0%"),
+        ]
 
-            st.subheader("📈 Ключевые показатели эффективности")
-            col1, col2, col3, col4 = st.columns(4)
-            with col1:
-                st.metric("NPV", f"{npv:,.0f} руб.",
-                          delta="Положительный" if npv > 0 else "Отрицательный")
-            with col2:
-                st.metric("IRR", f"{irr * 100:.1f}%",
-                          delta=f"{irr - st.session_state.project_data.discount_rate:.1%}")
-            with col3:
-                st.metric("Срок окупаемости", f"{payback:.1f} лет" if payback != float('inf') else "Не окупается")
-            with col4:
-                pi = (npv + total_investment) / total_investment if total_investment > 0 else 0
-                st.metric("PI (Индекс доходности)", f"{pi:.2f}")
+        res_df = pd.DataFrame(make_rows(comm_scenarios))
 
-            cumulative_npv = 0
-            npv_by_year = []
-            for i, year in enumerate(sorted(cash_flows.keys())):
-                cumulative_npv += cash_flows[year] / ((1 + st.session_state.project_data.discount_rate) ** i)
-                npv_by_year.append(cumulative_npv)
+        def highlight_comm(row):
+            bg = "#eaf4ea" if "С ГП" in str(row["Вариант"]) else "#f0f4fb"
+            return [f"background-color:{bg}; font-weight:bold"] * len(row)
 
-            fig_npv = go.Figure()
-            fig_npv.add_trace(go.Scatter(x=list(cash_flows.keys()), y=npv_by_year,
-                                         mode='lines+markers', name='Накопленный NPV'))
-            fig_npv.add_hline(y=0, line_dash="dash", line_color="red")
-            fig_npv.update_layout(title="Динамика NPV", xaxis_title="Год", yaxis_title="NPV, руб.")
-            st.plotly_chart(fig_npv, use_container_width=True)
+        st.subheader("Сводные показатели")
+        st.dataframe(res_df.style.apply(highlight_comm, axis=1),
+                     use_container_width=True, hide_index=True)
 
-        else:
-            st.warning("Сначала заполните данные о продукции и выручке")
+        st.divider()
+        st.subheader(f"Показатели при ставке дисконтирования {dr_pct:.2f}%")
+
+        npv_ng = calc_npv(cf_no_gp, dr)
+        npv_wg = calc_npv(cf_with_gp, dr)
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("NPV без ГП, тыс. руб.", f"{npv_ng:,.0f}",
+                  delta="▲ положит." if npv_ng > 0 else "▼ отрицат.")
+        c2.metric("NPV с ГП, тыс. руб.", f"{npv_wg:,.0f}",
+                  delta="▲ положит." if npv_wg > 0 else "▼ отрицат.")
+        c3.metric("IRR без ГП", fmt(calc_irr(cf_no_gp), "%"))
+        c4.metric("IRR с ГП", fmt(calc_irr(cf_with_gp), "%"))
+
+        c5, c6, c7, c8 = st.columns(4)
+        c5.metric("Окупаемость без ГП", fmt(calc_payback(cf_no_gp), " лет"))
+        c6.metric("Окупаемость с ГП", fmt(calc_payback(cf_with_gp), " лет"))
+        c7.metric("Диск. окуп. без ГП", fmt(calc_dpayback(cf_no_gp, dr), " лет"))
+        c8.metric("Диск. окуп. с ГП", fmt(calc_dpayback(cf_with_gp, dr), " лет"))
+
+        # ══════════════════════════════════════════════════════════════
+        # ОБЩЕСТВЕННАЯ ЭФФЕКТИВНОСТЬ
+        # ══════════════════════════════════════════════════════════════
+        st.divider()
+        st.markdown("## Общественная эффективность")
+
+        soc_scenarios = [
+            ("Общественная эфф.", cf_soc, dr, f"{dr_pct:.2f}%"),
+            ("Общественная эфф.", cf_soc, 0.0, "0%"),
+        ]
+
+        soc_df = pd.DataFrame(make_rows(soc_scenarios))
+        st.subheader("Сводные показатели")
+        st.dataframe(
+            soc_df.style.apply(
+                lambda row: ["background-color:#f0f8ff; font-weight:bold"] * len(row), axis=1),
+            use_container_width=True, hide_index=True)
+
+        st.divider()
+        st.subheader(f"Показатели при ставке дисконтирования {dr_pct:.2f}%")
+
+        npv_soc = calc_npv(cf_soc, dr)  # NPV при введённой ставке — дисконтируем cf_soc
+        npv_soc_0 = calc_npv(cf_soc, 0.0)  # NPV при 0%
+        inv_soc = abs(sum(v for v in cf_soc if v < 0)) or 1.0
+        pi_soc = 1 + npv_soc / inv_soc
+
+        cs1, cs2, cs3, cs4 = st.columns(4)
+        cs1.metric("NPV, тыс. руб.", f"{npv_soc:,.0f}",
+                   delta="▲ положит." if npv_soc > 0 else "▼ отрицат.")
+        cs2.metric("IRR, %", fmt(calc_irr(cf_soc), "%"))
+        cs4.metric("Срок окупаемости", fmt(calc_payback(cf_soc), " лет"))
+
+
+
+        # ══════════════════════════════════════════════════════════════
+        # СРАВНИТЕЛЬНЫЙ ГРАФИК ВСЕХ ТРЁХ ВИДОВ ЭФФЕКТИВНОСТИ
+        # ══════════════════════════════════════════════════════════════
+        st.divider()
+        st.subheader("Динамика накопленного NPV: сравнение видов эффективности")
+
+        # Для общественной эффективности — два варианта строк
+        cf_soc_disc = get_cf_list(soc_pr_df, "ДП ОЭ с дисконтированием")  # уже дисконтированный
+        cf_soc_nodisk = get_cf_list(soc_pr_df,
+                                    "Сальдо ДП для расчета общественной эффективности (без дисконтирования)")  # без дисконтирования
+
+        # Накопленный NPV коммерческой эфф. — через cum_series с dr
+        # Накопленный NPV общественной эфф. — дисконтированный ряд суммируем напрямую (уже дисконтирован)
+        def cum_sum(cf_list):
+            """Простое накопление — для уже дисконтированного ряда."""
+            result, acc = [], 0.0
+            for cf in cf_list:
+                acc += cf
+                result.append(acc)
+            return result
+
+        fig_compare = go.Figure()
+
+        # 1. Коммерческая без ГП (введённая ставка)
+        fig_compare.add_trace(go.Scatter(
+            x=sy, y=cum_series(cf_no_gp, dr),
+            name=f"Коммерч. без ГП ({dr_pct:.1f}%)",
+            mode="lines+markers",
+            line=dict(color="#1f77b4", width=2)
+        ))
+
+        # 2. Коммерческая с ГП (введённая ставка)
+        fig_compare.add_trace(go.Scatter(
+            x=sy, y=cum_series(cf_with_gp, dr),
+            name=f"Коммерч. с ГП ({dr_pct:.1f}%)",
+            mode="lines+markers",
+            line=dict(color="#2ca02c", width=2)
+        ))
+
+        # 3. Общественная — дисконтированный ряд (суммируем напрямую)
+        fig_compare.add_trace(go.Scatter(
+            x=sy, y=cum_series(cf_soc, dr),
+            name=f"Общественная ({dr_pct:.1f}%)",
+            mode="lines+markers",
+            line=dict(color="#9467bd", width=2)
+        ))
+
+
+        fig_compare.add_hline(y=0, line_dash="dash", line_color="gray", annotation_text="NPV=0")
+        fig_compare.update_layout(
+            xaxis_title="Год",
+            yaxis_title="Накопл. NPV, тыс. руб.",
+            height=480,
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        )
+        st.plotly_chart(fig_compare, use_container_width=True)
 
     with tab_export:
         st.header("Экспорт данных")
