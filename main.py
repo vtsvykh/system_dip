@@ -2073,6 +2073,150 @@ def build_social_eff_without_matrix(years, taxes_df, cf_saldo_without,
 
     return pd.DataFrame(rows)
 
+def build_social_eff_project_matrix(years, finance_df,
+                                     cf_saldo_project,
+                                     soc_eff_df, soc_eff_without_df,
+                                     price_effects, indirect_effects,
+                                     other_tax_effects, discount_rate):
+    """
+    ДП общественной эффективности проекта (таблица 3 = с проектом - без проекта).
+    cf_saldo_project   — dict {year: value} из таблицы 3 блока ДП
+    soc_eff_df         — DataFrame вкладки ДП Общ Эфф (с проектом)
+    soc_eff_without_df — DataFrame вкладки ДП Общ Эфф (без проекта)
+    """
+    sorted_years = sorted(years)
+
+    def get_first_row(df, name):
+        if df is None or df.empty:
+            return {}
+        rows = df[df["Наименование статьи"] == name]
+        if rows.empty:
+            return {}
+        return rows.iloc[0].to_dict()
+
+    def v(d, year):
+        return float(d.get(year, 0.0) or 0.0)
+
+    # Строки из двух таблиц общественной эффективности
+    with_vat_row      = get_first_row(soc_eff_df,         "НДС")
+    with_inc_row      = get_first_row(soc_eff_df,         "Налог на прибыль")
+    with_exc_row      = get_first_row(soc_eff_df,         "Акциз")
+    with_prop_row     = get_first_row(soc_eff_df,         "Налог на имущество")
+
+    wo_vat_row        = get_first_row(soc_eff_without_df, "НДС")
+    wo_inc_row        = get_first_row(soc_eff_without_df, "Налог на прибыль")
+    wo_exc_row        = get_first_row(soc_eff_without_df, "Акциз")
+    wo_prop_row       = get_first_row(soc_eff_without_df, "Налог на имущество")
+
+    # Бюджетное финансирование (поступление) из finance_df
+    budget_row = get_first_row(finance_df, "поступление")
+
+    def r(name):
+        return {"Наименование статьи": name}
+
+    row_comm_saldo      = r("Сальдо ДП для расчета коммерческой эффективности")
+    row_tax_hdr         = r("Налоговые эффекты")
+    row_amurstal_hdr    = r("Налоговые эффекты Амурстали")
+    row_vat             = r("НДС")
+    row_inc_tax         = r("Налог на прибыль")
+    row_excise          = r("Акциз")
+    row_prop_tax        = r("Налог на имущество")
+    row_tax_amurstal    = r("Итого налоговые эффекты Амурстали")
+    row_other_tax       = r("Прочие налоговые эффекты")
+    row_price_eff       = r("Ценовые эффекты")
+    row_indirect_eff    = r("Косвенные эффекты")
+    row_saldo_soc       = r("Сальдо ДП для расчета общественной эффективности (без дисконтирования)")
+    row_soc_disc        = r("ДП ОЭ с дисконтированием")
+    row_disc_dp_hdr     = r("Расчет дисконтированных ДП")
+    row_comm_no_gp      = r("ДП коммерческой эффективности без ГП")
+    row_comm_no_gp_disc = r("ДП коммерческой эффективности без ГП (с дисконтированием)")
+    row_comm_gp         = r("ДП коммерческой эффективности с ГП")
+    row_comm_gp_disc    = r("ДП коммерческой эффективности с ГП (с дисконтированием)")
+    row_disc_eff_hdr    = r("Расчет дисконтированных эффектов")
+    row_tax_amurstal_d  = r("Налоговые эффекты Амурстали (дисконт.)")
+    row_other_tax_d     = r("Прочие налоговые эффекты (дисконт.)")
+    row_indirect_d      = r("Косвенные эффекты (дисконт.)")
+    row_price_d         = r("Ценовые эффекты (дисконт.)")
+
+    for i, year in enumerate(sorted_years):
+        n = i + 1
+        disc_factor = (1 + discount_rate * 100) ** n
+
+        # ── Коммерческое сальдо (таблица 3) ──────────────────────────
+        comm_saldo = v(cf_saldo_project, year)
+        row_comm_saldo[year] = comm_saldo
+
+        # ── Налоговые эффекты Амурстали (разница с/без) ───────────────
+        vat_val      = v(with_vat_row,  year) - v(wo_vat_row,  year)
+        inc_tax_val  = v(with_inc_row,  year) - v(wo_inc_row,  year)
+        excise_val   = v(with_exc_row,  year) - v(wo_exc_row,  year)
+        prop_tax_val = v(with_prop_row, year) - v(wo_prop_row, year)
+        tax_amurstal = vat_val + inc_tax_val + excise_val + prop_tax_val
+
+        row_tax_hdr[year]      = None
+        row_amurstal_hdr[year] = None
+        row_vat[year]          = vat_val
+        row_inc_tax[year]      = inc_tax_val
+        row_excise[year]       = excise_val
+        row_prop_tax[year]     = prop_tax_val
+        row_tax_amurstal[year] = tax_amurstal
+
+        # ── Пользовательский ввод ──────────────────────────────────────
+        other_tax    = v(other_tax_effects, year)
+        price_eff    = v(price_effects,     year)
+        indirect_eff = v(indirect_effects,  year)
+
+        row_other_tax[year]    = other_tax
+        row_price_eff[year]    = price_eff
+        row_indirect_eff[year] = indirect_eff
+
+        # ── Сальдо общественной эффективности ─────────────────────────
+        tax_total = tax_amurstal + other_tax
+        saldo_soc = comm_saldo + tax_total + price_eff + indirect_eff
+        row_saldo_soc[year] = saldo_soc
+        row_soc_disc[year]  = saldo_soc / disc_factor
+
+        # ── Дисконтированные ДП ────────────────────────────────────────
+        budget_val = v(budget_row, year)
+
+        row_disc_dp_hdr[year]        = None
+        row_comm_no_gp[year]         = comm_saldo
+        row_comm_no_gp_disc[year]    = comm_saldo / disc_factor
+        row_comm_gp[year]            = comm_saldo + budget_val
+        row_comm_gp_disc[year]       = (comm_saldo + budget_val) / disc_factor
+
+        # ── Дисконтированные эффекты ───────────────────────────────────
+        row_disc_eff_hdr[year]       = None
+        row_tax_amurstal_d[year]     = tax_amurstal / disc_factor
+        row_other_tax_d[year]        = other_tax    / disc_factor
+        row_indirect_d[year]         = indirect_eff / disc_factor
+        row_price_d[year]            = price_eff    / disc_factor
+
+    rows = [
+        row_comm_saldo,
+        row_tax_hdr,
+        row_amurstal_hdr,
+        row_vat, row_inc_tax, row_excise, row_prop_tax,
+        row_tax_amurstal,
+        row_other_tax,
+        row_price_eff,
+        row_indirect_eff,
+        row_saldo_soc,
+        row_soc_disc,
+        row_disc_dp_hdr,
+        row_comm_no_gp,
+        row_comm_no_gp_disc,
+        row_comm_gp,
+        row_comm_gp_disc,
+        row_disc_eff_hdr,
+        row_tax_amurstal_d,
+        row_other_tax_d,
+        row_indirect_d,
+        row_price_d,
+    ]
+
+    return pd.DataFrame(rows)
+
 # ========== ОСНОВНОЕ ПРИЛОЖЕНИЕ ==========
 def main():
     st.set_page_config(page_title="Инвестиционный калькулятор", layout="wide")
@@ -2445,7 +2589,7 @@ def main():
 
             st.rerun()
 
-    tab_input, tab_reports, tab_revenue, tab_opex, tab_nwc, tab_invest, tab_fixed, tab_finance, tab_taxes, tab_profit, tab_cf, tab_soc_eff, tab_soc_eff_without, tab_results, tab_export = st.tabs(
+    tab_input, tab_reports, tab_revenue, tab_opex, tab_nwc, tab_invest, tab_fixed, tab_finance, tab_taxes, tab_profit, tab_cf, tab_soc_eff, tab_soc_eff_without, tab_soc_eff_project, tab_results, tab_export = st.tabs(
         [
             "📝 Ввод данных",
             "📂 Загруженная отчетность",
@@ -2459,7 +2603,8 @@ def main():
             "📊 Прибыль",
             "💵 ДП операц. и инвест.",
             "🌍 ДП Общественной эффективности",
-            "🌍 ДП Общ. эфф. (без проекта)",  # ← добавлена
+            "🌍 ДП Общ. эфф. (без проекта)",
+            "🌍 ДП Общ. эфф. (проект)",
             "📈 Анализ эффективности",
             "💾 Экспорт",
         ])
@@ -4423,6 +4568,162 @@ def main():
                 legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
             )
             st.plotly_chart(fig_wo, use_container_width=True)
+
+    with tab_soc_eff_project:
+        st.header("🌍 ДП Общественной эффективности проекта")
+
+        years = st.session_state.project_data.years
+        finance_df = st.session_state.get("finance_df")
+        cf_saldo_project = st.session_state.get("cf_saldo_project", {})
+        soc_eff_df = st.session_state.get("soc_eff_df")
+        soc_eff_without_df = st.session_state.get("soc_eff_without_df")
+
+        missing = []
+        if finance_df is None:          missing.append("'💳 Финансирование'")
+        if not cf_saldo_project:        missing.append("'💵 ДП операц. и инвест.'")
+        if soc_eff_df is None:          missing.append("'🌍 ДП Общественной эффективности'")
+        if soc_eff_without_df is None:  missing.append("'🌍 ДП Общ. эфф. (без проекта)'")
+
+        if not years:
+            st.warning("Сначала укажите диапазон лет во вкладке '📝 Ввод данных'.")
+        elif missing:
+            st.info(f"Сначала откройте вкладки: {', '.join(missing)}")
+        else:
+            discount_rate = (st.session_state.project_data.discount_rate or 17.9) / 100.0
+
+            # ── Инициализация пользовательских вводов ─────────────────────
+            if "soc_pr_other_tax" not in st.session_state:
+                st.session_state.soc_pr_other_tax = {y: 0.0 for y in years}
+            if "soc_pr_price_eff" not in st.session_state:
+                st.session_state.soc_pr_price_eff = {y: 0.0 for y in years}
+            if "soc_pr_indirect_eff" not in st.session_state:
+                st.session_state.soc_pr_indirect_eff = {y: 0.0 for y in years}
+
+            with st.expander("✏️ Ввод прочих налоговых, ценовых и косвенных эффектов", expanded=False):
+                tabs_input = st.tabs([
+                    "Прочие налоговые эффекты",
+                    "Ценовые эффекты",
+                    "Косвенные эффекты"
+                ])
+
+                with tabs_input[0]:
+                    st.caption("Прочие налоговые эффекты (тыс. руб., постоянные цены)")
+                    cols = st.columns(min(len(years), 5))
+                    for idx, year in enumerate(years):
+                        with cols[idx % 5]:
+                            st.session_state.soc_pr_other_tax[year] = st.number_input(
+                                str(year),
+                                value=float(st.session_state.soc_pr_other_tax.get(year, 0.0)),
+                                step=1000.0, key=f"pr_other_tax_{year}"
+                            )
+
+                with tabs_input[1]:
+                    st.caption("Ценовые эффекты (тыс. руб., постоянные цены)")
+                    cols = st.columns(min(len(years), 5))
+                    for idx, year in enumerate(years):
+                        with cols[idx % 5]:
+                            st.session_state.soc_pr_price_eff[year] = st.number_input(
+                                str(year),
+                                value=float(st.session_state.soc_pr_price_eff.get(year, 0.0)),
+                                step=1000.0, key=f"pr_price_eff_{year}"
+                            )
+
+                with tabs_input[2]:
+                    st.caption("Косвенные эффекты (тыс. руб., постоянные цены)")
+                    cols = st.columns(min(len(years), 5))
+                    for idx, year in enumerate(years):
+                        with cols[idx % 5]:
+                            st.session_state.soc_pr_indirect_eff[year] = st.number_input(
+                                str(year),
+                                value=float(st.session_state.soc_pr_indirect_eff.get(year, 0.0)),
+                                step=1000.0, key=f"pr_indirect_eff_{year}"
+                            )
+
+            st.divider()
+
+            # ── Расчёт таблицы ─────────────────────────────────────────────
+            soc_pr_df = build_social_eff_project_matrix(
+                years=years,
+                finance_df=finance_df,
+                cf_saldo_project=cf_saldo_project,
+                soc_eff_df=soc_eff_df,
+                soc_eff_without_df=soc_eff_without_df,
+                price_effects=st.session_state.soc_pr_price_eff,
+                indirect_effects=st.session_state.soc_pr_indirect_eff,
+                other_tax_effects=st.session_state.soc_pr_other_tax,
+                discount_rate=discount_rate,
+            )
+
+            st.session_state.soc_eff_project_df = soc_pr_df
+
+            # ── Стилизация ─────────────────────────────────────────────────
+            header_rows = {
+                "Налоговые эффекты",
+                "Налоговые эффекты Амурстали",
+                "Расчет дисконтированных ДП",
+                "Расчет дисконтированных эффектов",
+            }
+            bold_rows = {
+                "Итого налоговые эффекты Амурстали",
+                "Сальдо ДП для расчета коммерческой эффективности",
+                "Сальдо ДП для расчета общественной эффективности (без дисконтирования)",
+                "ДП ОЭ с дисконтированием",
+            }
+
+            def style_soc_pr(row):
+                name = row["Наименование статьи"]
+                if name in header_rows:
+                    return ["font-weight: bold; background-color: #f0f2f6"] * len(row)
+                if name in bold_rows:
+                    return ["font-weight: bold"] * len(row)
+                return [""] * len(row)
+
+            fmt = {year: "{:,.2f}" for year in years}
+            st.dataframe(
+                soc_pr_df.style.format(fmt, na_rep="").apply(style_soc_pr, axis=1),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+            # ── График ─────────────────────────────────────────────────────
+            def get_row_vals(df, name):
+                rows = df[df["Наименование статьи"] == name]
+                if rows.empty:
+                    return [0.0] * len(years)
+                return [float(rows.iloc[0].get(y, 0.0) or 0.0) for y in years]
+
+            saldo_vals = get_row_vals(soc_pr_df,
+                                      "Сальдо ДП для расчета общественной эффективности (без дисконтирования)")
+            soc_disc_vals = get_row_vals(soc_pr_df, "ДП ОЭ с дисконтированием")
+            comm_gp_vals = get_row_vals(soc_pr_df, "ДП коммерческой эффективности с ГП (с дисконтированием)")
+
+            fig_pr = go.Figure()
+            fig_pr.add_trace(go.Bar(
+                x=years, y=saldo_vals,
+                name="Сальдо ДП ОЭ (без дисконт.)",
+                marker_color="#1f77b4"
+            ))
+            fig_pr.add_trace(go.Scatter(
+                x=years, y=soc_disc_vals,
+                name="ДП ОЭ (дисконт.)",
+                mode="lines+markers",
+                line=dict(color="#d62728", width=2)
+            ))
+            fig_pr.add_trace(go.Scatter(
+                x=years, y=comm_gp_vals,
+                name="ДП коммерч. с ГП (дисконт.)",
+                mode="lines+markers",
+                line=dict(color="#2ca02c", width=2, dash="dot")
+            ))
+            fig_pr.add_hline(y=0, line_dash="dash", line_color="gray")
+            fig_pr.update_layout(
+                title="ДП общественной эффективности проекта",
+                xaxis_title="Год",
+                yaxis_title="Тыс. руб.",
+                height=420,
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+            )
+            st.plotly_chart(fig_pr, use_container_width=True)
 
     with tab_results:
         st.header("Анализ эффективности инвестиций")
