@@ -4844,7 +4844,7 @@ def main():
             soc_df.style.apply(
                 lambda row: ["background-color:#f0f8ff; font-weight:bold"] * len(row), axis=1),
             use_container_width=True, hide_index=True)
-
+#
         st.divider()
         st.subheader(f"Показатели при ставке дисконтирования {dr_pct:.2f}%")
 

@@ -55,7 +55,7 @@ def calc_irr(cashflows: list[float]) -> float:
 
     except Exception:
         return float("nan")
-
+#
 def calc_payback(cashflows: list[float]) -> float:
     """Простой срок окупаемости (лет)."""
     cum = 0.0
