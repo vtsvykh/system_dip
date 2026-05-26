@@ -230,9 +230,7 @@ def build_opex_matrix(project_data, years, deflators, vat_rates,
                       cost_prices, cost_volumes,
                       avg_cost_structure, avg_salary,
                       cslyab_data, transport_price, transport_product,
-                      cash_flow_df, income_df,
-                      equipment_share, construction_share, pir_share,
-                      equipment_dep, construction_dep):
+                      income_df):   # ← убраны лишние параметры
 
     rows = []
 
@@ -403,85 +401,19 @@ def build_opex_matrix(project_data, years, deflators, vat_rates,
 
     rows.append(row_transport)
 
-    # ── Амортизация (скрытые расчёты) ───────────────────────────────
-    opc_4221 = extract_row_by_code(cash_flow_df, 4221)
-
-    row_depreciation = {"Наименование статьи": "Амортизация"}
-
-    amort = {}
-    for year in years:
-        defl    = deflators.get(year, 1.0)
-        vat     = vat_rates.get(year, 0.20)
-        inv_421 = - opc_4221.get(year, 0.0)
-
-        inv_equip  = inv_421 * equipment_share * (1 + vat) / defl
-        va_equip   = inv_equip / (1 + vat) if (1 + vat) != 0 else 0.0
-        amo_equip  = equipment_dep * va_equip / defl if defl not in (0, None) else 0.0
-
-        inv_smr   = inv_421 * construction_share * (1 + vat)
-        va_smr    = inv_smr / (1 + vat) if (1 + vat) != 0 else 0.0
-        amo_smr   = construction_dep * va_smr / defl if defl not in (0, None) else 0.0
-
-        inv_pir   = inv_421 * pir_share * (1 + vat)
-        va_pir    = inv_pir / (1 + vat) if (1 + vat) != 0 else 0.0
-        amo_pir   = construction_dep * va_pir / defl if defl not in (0, None) else 0.0
-
-        amort[year] = amo_equip + amo_smr + amo_pir
-        row_depreciation[year] = amort[year]
-
-    # ── Амортизация с накопительным учётом ВА ───────────────────────
-    opc_4221 = extract_row_by_code(cash_flow_df, 4221)
-
+    # ── Амортизация — берётся из таблицы Основной капитал ───────────────
     row_depreciation = {"Наименование статьи": "Амортизация"}
     amort = {}
 
-    # Фиксированные инвестиции в ПИР — вне цикла
-    _years_pir = list(range(2016, 2036))
-    _pir_values = [
-        0, 9716, 90, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0
-    ]
-    _pir_invest_dict = dict(zip(_years_pir, _pir_values))
+    amo_total_from_fixed = st.session_state.get("amo_total", {})
 
-    # Фиксированные значения ВА на начало периода для ПИР
-    _va_pir_begin_dict = dict(zip(_years_pir, [
-        0, 8097, 7970, 7970, 7970, 7970, 7970, 7970, 7970, 7970,
-        7970, 7970, 7970, 7970, 7970, 7970, 7970, 7970, 7970, 7970
-    ]))
-
-    # Начальные значения ВА на конец предыдущего периода (только для equip и smr)
-    va_equip_end = 0.0
-    va_smr_end = 0.0
-
-    debug_rows = []
+    if not amo_total_from_fixed:
+        st.warning("⚠️ Амортизация не рассчитана. Откройте вкладку '🏛️ Основной капитал' сначала.")
 
     for year in years:
-        defl = deflators.get(year, 1.0)
-        vat = vat_rates.get(year, 0.20)
-        inv_421 = -opc_4221.get(year, 0.0)
-
-        # Инвестиции по категориям без НДС
-        inv_equip_novat = inv_421 * equipment_share
-        inv_smr_novat = inv_421 * construction_share
-        inv_pir_novat = float(_pir_invest_dict.get(year, 0.0))
-
-        # ВА на начало периода
-        va_equip_begin = va_equip_end + inv_equip_novat
-        va_smr_begin = va_smr_end + inv_smr_novat
-        va_pir_begin = float(_va_pir_begin_dict.get(year, 0.0))  # ← фиксированное
-
-        # Амортизация за период
-        amo_equip = equipment_dep * va_equip_begin / defl
-        amo_smr = construction_dep * va_smr_begin / defl
-        amo_pir = construction_dep * va_pir_begin / defl
-
-        # ВА на конец периода (только для equip и smr — накопительно)
-        va_equip_end = max(0.0, va_equip_begin - amo_equip)
-        va_smr_end = max(0.0, va_smr_begin - amo_smr)
-        # ВА на конец для ПИР = ВА начало - амортизация (для отладки)
-        va_pir_end = max(0.0, va_pir_begin - amo_pir)
-
-        amort[year] = amo_equip + amo_smr + amo_pir
+        defl = deflators.get(year, 1.0) or 1.0
+        # amo_total хранится в текущих ценах → делим на дефлятор
+        amort[year] = amo_total_from_fixed.get(year, 0.0) / defl
         row_depreciation[year] = amort[year]
 
     rows.append(row_depreciation)
@@ -493,10 +425,11 @@ def build_opex_matrix(project_data, years, deflators, vat_rates,
     # Фиксированные прочие затраты (в тех же единицах, что и остальные затраты)
     _years_other = list(range(2016, 2036))
     _other_values = [
-        0, 987_028, 2_741_531, 3_752_624, 2_711_144, 6_000_939,
-        3_662_948, 4_678_828, 3_138_789, 6_962_630, 6_962_630,
-        6_962_630, 18_258_401, 16_520_549, 16_520_549, 16_520_549,
-        16_520_549, 16_520_549, 16_520_549, 16_520_549
+        0.0, 987_027.7, 2_735_992.3, 3_747_735.0,
+        2_707_015.4, 5_997_313.0, 3_659_688.2, 4_675_161.9,
+        3_134_608.5, 6_962_630.0, 6_962_630.0, 6_962_630.0,
+        18_258_401.4, 16_520_548.7, 16_520_548.7, 16_520_548.7,
+        16_520_548.7, 16_520_548.7, 16_520_548.7, 16_520_548.7,
     ]
     _other_costs_dict = dict(zip(_years_other, _other_values))
 
@@ -526,8 +459,7 @@ def build_opex_matrix(project_data, years, deflators, vat_rates,
     row_vat_in_costs = {"Наименование статьи": "НДС в затратах"}
     row_opex_with_vat = {"Наименование статьи": "Операционные затраты с НДС"}
     row_opex_without_vat = {"Наименование статьи": "Операционные затраты без НДС"}
-    row_opex_nodep_vat = {"Наименование статьи": "Опex без амортизации с НДС"}
-    row_opex_nodep_novat = {"Наименование статьи": "Опex без амортизации без НДС"}
+    row_opex_nodep_vat = {"Наименование статьи": "Операционные издержки без амортизации с НДС"}
 
     # Фиксированный НДС в затратах — вне цикла
     _years_vat_costs = list(range(2016, 2036))
@@ -565,12 +497,32 @@ def build_opex_matrix(project_data, years, deflators, vat_rates,
         row_opex_with_vat[year] = opex_with_vat
         row_opex_without_vat[year] = opex_wo_vat
         row_opex_nodep_vat[year] = opex_nodep_vat
-        row_opex_nodep_novat[year] = opex_nodep_novat
+
+    # Операционные издержки без НДС, без амортизации, с акцизом (фиксированные)
+    _years_opex_nodep_novat_exc = list(range(2016, 2036))
+    _opex_nodep_novat_exc_values = [
+        0, 6_091_949, 19_132_206, 28_433_612, 22_911_695,
+        42_772_211, 31_313_503, 40_609_051, 34_620_655,
+        43_650_652, 43_786_842, 43_796_991, 83_193_484,
+        100_614_114, 100_592_551, 100_574_793, 100_560_156,
+        100_548_076, 100_538_094, 100_529_832,
+    ]
+    _opex_nodep_novat_exc_dict = dict(
+        zip(_years_opex_nodep_novat_exc, _opex_nodep_novat_exc_values)
+    )
+    row_opex_nodep_novat_excise = {
+        "Наименование статьи": "Операционные издержки без амортизации без НДС"
+    }
+    for year in years:
+        row_opex_nodep_novat_excise[year] = float(
+            _opex_nodep_novat_exc_dict.get(year, 0.0)
+        )
 
     rows.extend([
         row_costs_with_vat, row_net_costs, row_vat_in_costs,
         row_opex_with_vat, row_opex_without_vat,
-        row_opex_nodep_vat, row_opex_nodep_novat,
+        row_opex_nodep_vat,
+        row_opex_nodep_novat_excise,
     ])
 
     return pd.DataFrame(rows)
@@ -695,23 +647,49 @@ def build_invest_matrix(cash_flow_df, years, deflators, vat_rates,
     inv_smr_raw    = {}   # Инвестиции в СМР
     inv_pir_raw    = {}   # Инвестиции в ПИР
 
-    for year in years:
-        vat        = vat_rates.get(year, 0.20)
-        inv_421    = -opc_4221.get(year, 0.0)   # знак минус, т.к. ОДДС 4221 отрицательный
+    # Фиксированные значения для Оборудования 2027–2029
+    _fixed_equip = {2027: 0.0, 2028: 8_435_125.0, 2029: 461_712.0}
 
-        if 2017 <= year <= 2018:
-            inv_equip_raw[year] = inv_421 * (equipment_share + pir_share) * (1 + vat)
+    # Фиксированные значения для СМР 2027–2029
+    _fixed_smr = {2027: 5_933_056.0, 2028: 685_598, 2029: 0.0}
+
+    # Фиксированные значения для ПИР 2027–2029
+    _fixed_pir = {2027: 36_933.0, 2028: 25_607.0, 2029: 0.0}
+
+    # Инвестиции в прирост ЧОК
+    _years_nwc_inv = list(range(2016, 2036))
+    _nwc_inv_values = [
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 601_941, 370_680, 0, 0, 0, 0, 0, 0, 0
+    ]
+    _nwc_inv_dict = dict(zip(_years_nwc_inv, _nwc_inv_values))
+
+    for year in years:
+        vat = vat_rates.get(year, 0.20)
+        inv_421 = -opc_4221.get(year, 0.0)
+
+        # ── Оборудование ──────────────────────────────────────────────
+        if year in _fixed_equip:
+            inv_equip_raw[year] = _fixed_equip[year]
+        elif 2017 <= year <= 2018:
+            inv_equip_raw[year] = inv_421 * equipment_share * (1 + vat)
         elif 2019 <= year <= 2024:
             inv_equip_raw[year] = inv_421 * (equipment_share + pir_share) * (1 + vat)
         else:
-            inv_equip_raw[year] = None          # заполним средним ниже
+            inv_equip_raw[year] = None  # заполним средним ниже
 
-        if 2017 <= year <= 2024:
+        # ── СМР ───────────────────────────────────────────────────────
+        if year in _fixed_smr:
+            inv_smr_raw[year] = _fixed_smr[year]
+        elif 2017 <= year <= 2024:
             inv_smr_raw[year] = inv_421 * construction_share * (1 + vat)
         else:
             inv_smr_raw[year] = None
 
-        if year in (2017, 2018):
+        # ── ПИР ───────────────────────────────────────────────────────
+        if year in _fixed_pir:
+            inv_pir_raw[year] = _fixed_pir[year]
+        elif year in (2017, 2018):
             inv_pir_raw[year] = inv_421 * pir_share * (1 + vat)
         else:
             inv_pir_raw[year] = 0.0
@@ -764,6 +742,30 @@ def build_invest_matrix(cash_flow_df, years, deflators, vat_rates,
         row_pir[year]       = pir_const
         row_total[year]     = total_const
         row_vat_capex[year] = vat_capex
+        row_nwc_inv = {"Наименование статьи": "Инвестиции в прирост ЧОК"}
+        row_total_all = {"Наименование статьи": "Итого общие инвестиции"}
+
+        # Скрытый расчёт: ЧОК в текущих ценах = фиксированное значение * дефлятор
+        nwc_inv_raw = {}
+
+        for year in years:
+            defl = deflators.get(year, 1.0) or 1.0
+
+            # Скрытый расчёт: приводим постоянные цены к текущим
+            nwc_inv_const = float(_nwc_inv_dict.get(year, 0.0))
+            nwc_inv_raw[year] = nwc_inv_const * defl
+
+            total_const = (
+                    inv_equip_raw[year] / defl
+                    + inv_smr_raw[year] / defl
+                    + inv_pir_raw.get(year, 0.0) / defl
+            )
+
+            row_nwc_inv[year] = nwc_inv_const
+            row_total_all[year] = total_const + nwc_inv_const
+
+        # Сохраняем скрытый расчёт ЧОК в текущих ценах
+        st.session_state.inv_nwc_raw = nwc_inv_raw
 
     rows.extend([
         row_header,
@@ -772,13 +774,36 @@ def build_invest_matrix(cash_flow_df, years, deflators, vat_rates,
         row_pir,
         row_total,
         row_vat_capex,
+        row_nwc_inv,  # ← новая строка
+        row_total_all,  # ← новая строка
     ])
 
-    # Сохраняем скрытые расчёты в session_state для использования в других блоках
-    st.session_state.inv_equip_raw  = inv_equip_raw
-    st.session_state.inv_smr_raw    = inv_smr_raw
-    st.session_state.inv_pir_raw    = inv_pir_raw
-    st.session_state.inv_total_raw  = inv_total_raw
+    # Сохраняем в session_state
+    st.session_state.inv_equip_raw = inv_equip_raw
+    st.session_state.inv_smr_raw = inv_smr_raw
+    st.session_state.inv_pir_raw = inv_pir_raw
+    # Инвестиции во ВА в текущих ценах (без ЧОК)
+    inv_total_raw = {
+        y: inv_equip_raw[y] + inv_smr_raw[y] + inv_pir_raw.get(y, 0.0)
+        for y in years
+    }
+
+    # Итоговые инвестиции в текущих ценах = ВА + прирост ЧОК (оба в текущих ценах)
+    inv_grand_total_raw = {
+        y: inv_total_raw[y] + nwc_inv_raw[y]
+        for y in years
+    }
+
+    st.session_state.inv_equip_raw = inv_equip_raw
+    st.session_state.inv_smr_raw = inv_smr_raw
+    st.session_state.inv_pir_raw = inv_pir_raw
+    st.session_state.inv_total_raw = inv_total_raw
+    st.session_state.inv_nwc_raw = nwc_inv_raw
+    st.session_state.inv_grand_total_raw = inv_grand_total_raw  # ← текущие цены
+    st.session_state.inv_grand_total = {  # ← постоянные цены
+        y: inv_grand_total_raw[y] / (deflators.get(y, 1.0) or 1.0)
+        for y in years
+    }
 
     return pd.DataFrame(rows)
 
@@ -827,8 +852,8 @@ def build_fixed_assets_matrix(years, deflators, vat_rates,
 
         # Амортизация
         amo_equip[year] = va_equip_begin[year] * equipment_dep
-        amo_smr[year]   = va_smr_begin[year]   * construction_dep
-        amo_pir[year]   = va_pir_begin[year]   * construction_dep
+        amo_smr[year]   = (va_smr_begin[year] +  va_pir_begin[year])   * construction_dep
+        amo_pir[year]   = (va_pir_begin[year] + amo_equip[year])   * construction_dep
 
         # ВА на конец периода
         va_equip_end[year] = max(0.0, va_equip_begin[year] - amo_equip[year])
@@ -899,7 +924,7 @@ def build_fixed_assets_matrix(years, deflators, vat_rates,
         row_amo_equip[year]    = amo_equip[year] / defl
         row_amo_smr[year]      = amo_smr[year]   / defl
         row_amo_pir[year]      = amo_pir[year]   / defl
-        row_amo_total[year]    = (amo_equip[year] + amo_smr[year] + amo_pir[year]) / defl
+        row_amo_total[year]    = (row_amo_equip[year] + row_amo_smr[year] + row_amo_pir[year])
 
         row_va_equip_end[year] = va_equip_end[year] / defl
         row_va_smr_end[year]   = va_smr_end[year]   / defl
@@ -922,6 +947,1129 @@ def build_fixed_assets_matrix(years, deflators, vat_rates,
         row_residual,
         row_prop_tax,
     ])
+
+    return pd.DataFrame(rows)
+
+def build_finance_matrix(cash_flow_df, years, deflators, vat_rates,
+                         inv_grand_total_raw):
+    """
+    Блок Финансирование.
+    Скрытые расчёты в текущих ценах, таблица — в постоянных (/ дефлятор).
+    """
+
+    # ── Извлечение строк ОДДС ────────────────────────────────────────
+    opc_4311 = extract_row_by_code(cash_flow_df, 4311)  # поступление кредитов
+    opc_4312 = extract_row_by_code(cash_flow_df, 4312)  # вклады собственников
+    opc_4313 = extract_row_by_code(cash_flow_df, 4313)  # выпуск акций
+    opc_4314 = extract_row_by_code(cash_flow_df, 4314)  # выпуск облигаций
+    opc_4319 = extract_row_by_code(cash_flow_df, 4319)  # прочие поступления фин.
+    opc_4323 = extract_row_by_code(cash_flow_df, 4323)  # погашение долга
+    opc_4329 = extract_row_by_code(cash_flow_df, 4329)  # прочие платежи
+    opc_4123 = extract_row_by_code(cash_flow_df, 4123)  # выплата процентов
+
+    sorted_years = sorted(years)
+
+    # ── Скрытые расчёты ──────────────────────────────────────────────
+
+    # Бюджетное финансирование
+    budget_receipt  = {}
+    budget_spending = {}
+
+    # Поступления от финансовых операций (компоненты)
+    owners_contrib  = {}
+    shares_issue    = {}
+    bonds_issue     = {}
+    other_receipts  = {}
+    other_payments  = {}
+
+    # Итого финансирование
+    total_receipt   = {}
+    total_spending  = {}
+
+    # Кредиты банков
+    loan_receipt    = {}
+    loan_repay      = {}   # погашение основного долга
+    loan_interest   = {}   # выплата процентов
+    loan_service    = {}   # обслуживание долга
+    loan_balance    = {}   # остаток долга
+
+    prev_loan_balance   = 0.0
+    prev_loan_interest  = 0.0
+
+    for i, year in enumerate(sorted_years):
+        vat  = vat_rates.get(year, 0.20)
+        defl = deflators.get(year, 1.0) or 1.0
+
+        # ── Бюджетное финансирование ─────────────────────────────────
+        if year >= 2027:
+            budget_receipt[year] = inv_grand_total_raw.get(year, 0.0)
+        else:
+            budget_receipt[year] = 0.0
+        budget_spending[year] = 0.0
+
+        # ── Поступления от фин. операций ─────────────────────────────
+        owners_contrib[year] = opc_4312.get(year, 0.0)
+        shares_issue[year]   = opc_4313.get(year, 0.0)
+        bonds_issue[year]    = opc_4314.get(year, 0.0)
+        other_receipts[year] = opc_4319.get(year, 0.0)
+        other_payments[year] = -opc_4329.get(year, 0.0)   # ОДДС отрицательный
+
+        fin_ops_receipt = (
+            owners_contrib[year]
+            + shares_issue[year]
+            + bonds_issue[year]
+            + other_receipts[year]
+        )
+
+        # ── Итого финансирование ──────────────────────────────────────
+        total_receipt[year]  = budget_receipt[year] + fin_ops_receipt
+        total_spending[year] = budget_spending[year] + other_payments[year]
+
+        # ── Кредиты банков ────────────────────────────────────────────
+        receipt = opc_4311.get(year, 0.0)
+        loan_receipt[year] = receipt
+
+        if year == 2025:
+            repay    = prev_loan_balance / 2
+            interest = (prev_loan_balance - repay) * 0.253
+        elif year == 2026:
+            repay    = prev_loan_balance - prev_loan_interest
+            interest = prev_loan_interest / 2
+        else:
+            repay    = -opc_4323.get(year, 0.0)
+            interest = -opc_4123.get(year, 0.0)
+
+        service = repay + interest
+        balance = prev_loan_balance + receipt - service
+
+        loan_repay[year]    = repay
+        loan_interest[year] = interest
+        loan_service[year]  = service
+        loan_balance[year]  = max(0.0, balance)
+
+        prev_loan_balance  = loan_balance[year]
+        prev_loan_interest = interest
+
+    # ── Сохраняем скрытые расчёты в session_state ────────────────────
+    st.session_state.fin_budget_receipt  = budget_receipt
+    st.session_state.fin_loan_balance    = loan_balance
+    st.session_state.fin_loan_interest   = loan_interest
+    st.session_state.fin_loan_service    = loan_service
+    st.session_state.fin_total_receipt   = total_receipt
+    st.session_state.fin_total_spending  = total_spending
+    st.session_state.fin_other_payments  = other_payments
+
+    # ── Строки таблицы (постоянные цены = / дефлятор) ────────────────
+    rows = []
+
+    def r(name):
+        return {"Наименование статьи": name}
+
+    row_budget_hdr = r("Бюджетное финансирование")
+    row_budget_rec = r("поступление")
+    row_budget_spe = r("расходование")
+    row_fin_ops = r("Поступление от финансовых операций")
+    row_owners = r("денежных вкладов собственников (участников)")
+    row_shares = r("от выпуска акций, увеличения долей участия")
+    row_bonds = r("от выпуска облигаций, векселей и других долговых ценных бумаг и др.")
+    row_other_rec = r("прочие поступления")
+    row_other_pay = r("прочие платежи")
+    row_total_hdr = r("Итого финансирование")
+    row_total_rec = r("поступление")
+    row_total_spe = r("расходование")
+    row_debt_hdr = r("Долгосрочные заемные средства")
+    row_credit_hdr = r("Кредиты банков")
+    row_loan_rec = r("поступление")
+    row_loan_repay = r("погашение основного долга")
+    row_loan_interest = r("выплата процентов")
+    row_loan_service = r("обслуживание долга")
+    row_loan_balance = r("остаток долга")
+
+    # Накопительный остаток долга в постоянных ценах для таблицы
+    prev_balance_const = 0.0
+
+    for i, year in enumerate(sorted_years):
+        defl = deflators.get(year, 1.0) or 1.0
+
+        # Бюджетное финансирование
+        row_budget_hdr[year] = None
+        row_budget_rec[year] = budget_receipt[year] / defl
+        row_budget_spe[year] = 0.0
+
+        # Поступления от фин. операций
+        row_fin_ops[year] = (
+                                    owners_contrib[year] + shares_issue[year]
+                                    + bonds_issue[year] + other_receipts[year]
+                            ) / defl
+        row_owners[year] = owners_contrib[year] / defl
+        row_shares[year] = shares_issue[year] / defl
+        row_bonds[year] = bonds_issue[year] / defl
+        row_other_rec[year] = other_receipts[year] / defl
+        row_other_pay[year] = other_payments[year] / defl
+
+        # Итого финансирование
+        row_total_hdr[year] = None
+        row_total_rec[year] = total_receipt[year] / defl
+        row_total_spe[year] = total_spending[year] / defl
+
+        # Кредиты банков
+        row_debt_hdr[year] = None
+        row_credit_hdr[year] = None
+        loan_rec_const = loan_receipt[year] / defl
+
+        if year == 2026:
+            # Обслуживание = остаток долга предыдущего периода
+            svc_const = prev_balance_const
+            int_const = loan_interest[year] / defl
+            repay_const = svc_const - int_const
+            balance_const = 0.0
+        else:
+            repay_const = loan_repay[year] / defl
+            int_const = loan_interest[year] / defl
+            svc_const = repay_const + int_const
+            # остаток = предыдущий + поступление - обслуживание
+            balance_const = max(0.0, prev_balance_const + loan_rec_const - svc_const)
+
+        row_loan_rec[year] = loan_rec_const
+        row_loan_repay[year] = repay_const
+        row_loan_interest[year] = int_const
+        row_loan_service[year] = svc_const
+        row_loan_balance[year] = balance_const
+
+        prev_balance_const = balance_const  # ← обновляем для следующей итерации
+
+    rows.extend([
+        row_budget_hdr,
+        row_budget_rec,
+        row_budget_spe,
+        row_fin_ops,
+        row_owners,
+        row_shares,
+        row_bonds,
+        row_other_rec,
+        row_other_pay,
+        row_total_hdr,
+        row_total_rec,
+        row_total_spe,
+        row_debt_hdr,
+        row_credit_hdr,
+        row_loan_rec,
+        row_loan_repay,
+        row_loan_interest,
+        row_loan_service,
+        row_loan_balance,
+    ])
+
+    return pd.DataFrame(rows)
+
+def build_taxes_matrix(years, deflators, income_df,
+                       vat_capex_raw,
+                       amo_total_raw,
+                       prop_tax_raw,
+                       loan_interest_raw,
+                       tax_rates_by_year,  # ← новое название
+                       sales_df,
+                       opex_df):
+    """
+    Блок Налоги.
+    Скрытые расчёты в текущих ценах, таблица — в постоянных (/ дефлятор).
+    """
+
+    sorted_years = sorted(years)
+
+    # ── Фиксированные данные ─────────────────────────────────────────
+
+    _years_range = list(range(2016, 2036))
+
+    _vat_charged_values = [
+        0, 829_120, 2_326_519, 3_567_277, 3_055_048, 6_545_147,
+        4_961_362, 7_378_230, 6_491_800, 9_686_103, 10_073_547,
+        10_476_489, 20_418_394, 25_233_453, 26_242_791, 27_292_502,
+        28_384_202, 29_519_571, 30_700_353, 31_928_368,
+    ]
+    _vat_costs_values = [
+        0, 588_928, 2_041_616, 3_343_175, 2_677_805, 5_812_456,
+        4_724_007, 6_597_577, 5_783_136, 8_043_816, 8_365_569,
+        8_700_192, 16_763_416, 22_411_494, 23_307_954, 24_240_272,
+        25_209_883, 26_218_278, 27_267_009, 28_357_690,
+    ]
+    _revenue_wo_vat_values = [
+        0, 4_248_161, 14_300_325, 21_985_854, 18_719_960, 40_120_950,
+        30_463_905, 45_154_273, 39_769_477, 56_977_077, 59_256_160,
+        61_626_407, 120_108_200, 148_432_074, 154_369_357, 160_544_132,
+        166_965_897, 173_644_533, 180_590_314, 195_747_257,
+    ]
+    _opex_no_dep_no_vat_values = [
+        0, 4_016_218, 13_188_385, 20_533_080, 17_733_442, 35_181_002,
+        28_913_668, 40_609_051, 37_449_162, 50_427_660, 52_608_394,
+        54_725_412, 108_110_384, 135_978_532, 141_387_364, 147_016_902,
+        152_875_326, 158_971_240, 165_313_675, 171_912_095,
+    ]
+    _amo_values = [
+        0, 190_335, 170_101, 159_333, 146_107, 138_229,
+        141_253, 173_264, 214_876, 211_144, 208_190, 307_102,
+        1_377_672, 1_252_135, 1_085_729, 943_753, 822_558,
+        719_038, 630_556, 554_867,
+    ]
+    _excise_values = [
+        0, 0, 0, 0, 0, 0,
+        506_269, 957_170, 965_036, 806_248, 983_431, 1_022_768,
+        2_239_267, 2_749_011, 2_858_971, 2_973_330, 3_092_263,
+        3_215_953, 3_344_592, 3_478_375,
+    ]
+    # Прочие доходы (расходы) из ОФР 2300 (нал), с 2016 по 2024
+    _other_income_nal = {
+        2016: 0, 2017: -287_049, 2018: 526_667, 2019: 849_036,
+        2020: 535_245, 2021: 4_380_673, 2022: 877_093,
+        2023: 3_723_151, 2024: 845_264,
+    }
+
+    vat_charged_dict      = dict(zip(_years_range, _vat_charged_values))
+    vat_costs_dict        = dict(zip(_years_range, _vat_costs_values))
+    revenue_wo_vat_dict   = dict(zip(_years_range, _revenue_wo_vat_values))
+    opex_no_dep_dict      = dict(zip(_years_range, _opex_no_dep_no_vat_values))
+    amo_dict              = dict(zip(_years_range, _amo_values))
+    excise_dict           = dict(zip(_years_range, _excise_values))
+
+    # Прочие доходы (расходы) с поправкой на ОФР 2300
+    fr_2300 = extract_row_by_code(income_df, 2300) if income_df is not None else {}
+
+    # ── Скрытые расчёты ──────────────────────────────────────────────
+
+    vat_charged     = {}   # НДС начисленный
+    vat_costs       = {}   # НДС в издержках
+    vat_capex       = {}   # НДС в капитальных затратах
+    vat_acquired    = {}   # НДС по приобретённым ценностям
+    vat_saldo       = {}   # Сальдо НДС
+    vat_dz_begin    = {}   # Остаток ДЗ по НДС на начало периода
+    vat_dz_end      = {}   # Остаток ДЗ по НДС на конец периода
+    vat_budget      = {}   # НДС в бюджет
+
+    revenue_wo_vat  = {}   # Выручка без НДС
+    opex_no_dep     = {}   # Операционные издержки без амортизации без НДС
+    amo             = {}   # Амортизация
+    ebitda          = {}   # EBITDA
+    ebit            = {}   # EBIT
+    interest        = {}   # Проценты
+    prop_tax        = {}   # Налог на имущество
+    other_income    = {}   # Прочие доходы (расходы)
+    taxable_profit  = {}   # Налогооблагаемая прибыль
+    income_tax      = {}   # Налог на прибыль
+    excise          = {}   # Акциз
+    total_taxes     = {}   # Итого налоги
+
+    prev_vat_dz_end = 0.0
+
+    for year in sorted_years:
+        defl = deflators.get(year, 1.0) or 1.0
+
+        # НДС
+        vc  = float(vat_charged_dict.get(year, 0.0))
+        vco = float(vat_costs_dict.get(year, 0.0))
+        vca = float(vat_capex_raw.get(year, 0.0))
+
+        vat_charged[year]  = vc
+        vat_costs[year]    = vco
+        vat_capex[year]    = vca
+        vat_acquired[year] = vco + vca
+        vat_saldo[year]    = vc - vat_acquired[year]
+        vat_dz_begin[year] = prev_vat_dz_end
+        vat_budget[year]   = max(0.0, vat_saldo[year] - vat_dz_begin[year])
+        vat_dz_end[year]   = max(
+            0.0,
+            vat_dz_begin[year] + vat_acquired[year] - vc
+        )
+        prev_vat_dz_end = vat_dz_end[year]
+
+        # П&У
+        rev   = float(revenue_wo_vat_dict.get(year, 0.0))
+        opex  = float(opex_no_dep_dict.get(year, 0.0))
+        am    = float(amo_dict.get(year, 0.0))
+        exc   = float(excise_dict.get(year, 0.0))
+        intr  = float(loan_interest_raw.get(year, 0.0))
+        ptax  = float(prop_tax_raw.get(year, 0.0))
+
+        # Прочие доходы: до 2024 — нал с поправкой на ОФР 2300, после — 0
+        if year <= 2024:
+            nal = float(_other_income_nal.get(year, 0.0))
+            fr_val = float(fr_2300.get(year, 0.0))
+            other_inc = nal - fr_val
+        else:
+            other_inc = 0.0
+
+        ebitda_val        = rev - opex
+        ebit_val          = ebitda_val - am
+        taxable           = ebit_val - intr - ptax - other_inc
+        rate_y = float(tax_rates_by_year.get(year, 20.0)) / 100.0
+        inc_tax = max(0.0, taxable * rate_y)
+
+        revenue_wo_vat[year] = rev
+        opex_no_dep[year]    = opex
+        amo[year]            = am
+        ebitda[year]         = ebitda_val
+        ebit[year]           = ebit_val
+        interest[year]       = intr
+        prop_tax[year]       = ptax
+        other_income[year]   = other_inc
+        taxable_profit[year] = taxable
+        income_tax[year]     = inc_tax
+        excise[year]         = exc
+        total_taxes[year]    = vat_budget[year] + inc_tax + exc + ptax
+
+    # ── Сохраняем скрытые расчёты в session_state ────────────────────
+    st.session_state.tax_vat_budget    = vat_budget
+    st.session_state.tax_income_tax    = income_tax
+    st.session_state.tax_excise        = excise
+    st.session_state.tax_total         = total_taxes
+    st.session_state.tax_ebitda        = ebitda
+    st.session_state.tax_ebit          = ebit
+    st.session_state.tax_taxable_profit = taxable_profit
+    st.session_state.tax_prop_tax      = prop_tax
+
+    # ── Строки таблицы (постоянные цены = / дефлятор) ────────────────
+    rows = []
+
+    def r(name):
+        return {"Наименование статьи": name}
+
+    row_vat_charged   = r("НДС начисленный (полученный от покупателей)")
+    row_vat_costs     = r("НДС в издержках")
+    row_vat_capex     = r("НДС в капитальных затратах")
+    row_vat_acquired  = r("НДС по приобретённым ценностям")
+    row_vat_saldo     = r("Сальдо НДС")
+    row_vat_dz_beg    = r("Остаток ДЗ по НДС на начало периода")
+    row_vat_dz_end    = r("Остаток ДЗ по НДС на конец периода")
+    row_vat_budget    = r("НДС в бюджет")
+
+    row_revenue       = r("Выручка от продажи (без НДС)")
+    row_opex          = r("Операционные издержки без амортизации без НДС")
+    row_ebitda        = r("Доход до выплаты процентов, налогов и амортизации (EBITDA)")
+    row_amo           = r("Амортизация")
+    row_ebit          = r("Доход до выплаты процентов и налогов (EBIT)")
+    row_interest      = r("Проценты")
+    row_prop_tax_line = r("Налоги, уменьшающие базу налога на прибыль")
+    row_other_inc     = r("Прочие доходы (расходы)")
+    row_taxable       = r("Налогооблагаемая прибыль")
+    row_income_tax    = r("Налог на прибыль")
+
+    row_excise        = r("Акциз")
+    row_other_taxes   = r("Прочие налоги (налог на имущество)")
+    row_total_taxes   = r("Итого налоги")
+
+    prev_dz_end_const = 0.0
+
+    for year in sorted_years:
+        defl = deflators.get(year, 1.0) or 1.0
+
+        # НДС в постоянных ценах
+        vc_c   = vat_charged[year]  / defl
+        vco_c  = vat_costs[year]    / defl
+        vca_c  = vat_capex[year]    / defl
+        vacq_c = vco_c + vca_c
+        saldo_c = vc_c - vacq_c
+        dz_beg_c = prev_dz_end_const
+        vat_b_c  = max(0.0, saldo_c - dz_beg_c)
+        dz_end_c = max(0.0, dz_beg_c + vacq_c - vc_c)
+        prev_dz_end_const = dz_end_c
+
+        row_vat_charged[year]  = vc_c
+        row_vat_costs[year]    = vco_c
+        row_vat_capex[year]    = vca_c
+        row_vat_acquired[year] = vacq_c
+        row_vat_saldo[year]    = saldo_c
+        row_vat_dz_beg[year]   = dz_beg_c
+        row_vat_dz_end[year]   = dz_end_c
+        row_vat_budget[year]   = vat_b_c
+
+        # П&У в постоянных ценах
+        row_revenue[year]       = revenue_wo_vat[year]  / defl
+        row_opex[year]          = opex_no_dep[year]     / defl
+        row_ebitda[year]        = ebitda[year]          / defl
+        row_amo[year]           = amo[year]             / defl
+        row_ebit[year]          = ebit[year]            / defl
+        row_interest[year]      = interest[year]        / defl
+        row_prop_tax_line[year] = prop_tax[year]        / defl
+        row_other_inc[year]     = other_income[year]    / defl
+        row_taxable[year]       = taxable_profit[year]  / defl
+        row_income_tax[year]    = income_tax[year]      / defl
+
+        # Прочие налоги и итого
+        row_excise[year]        = excise[year]          / defl
+        row_other_taxes[year]   = prop_tax[year]        / defl
+        row_total_taxes[year]   = total_taxes[year]     / defl
+
+    rows.extend([
+        row_vat_charged,
+        row_vat_costs,
+        row_vat_capex,
+        row_vat_acquired,
+        row_vat_saldo,
+        row_vat_dz_beg,
+        row_vat_dz_end,
+        row_vat_budget,
+        row_revenue,
+        row_opex,
+        row_ebitda,
+        row_amo,
+        row_ebit,
+        row_interest,
+        row_prop_tax_line,
+        row_other_inc,
+        row_taxable,
+        row_income_tax,
+        row_excise,
+        row_other_taxes,
+        row_total_taxes,
+    ])
+
+    # В build_taxes_matrix(), после блока сохранения session_state:
+    st.session_state.tax_other_income_raw = other_income  # {year: значение в тек. ценах}
+
+    return pd.DataFrame(rows)
+
+def build_profit_matrix(years, deflators, cash_flow_df,
+                        sales_df,           # DataFrame вкладки Продажи
+                        opex_df,            # DataFrame вкладки Операционные издержки
+                        fixed_assets_df,    # DataFrame вкладки Основной капитал
+                        finance_df,         # DataFrame вкладки Финансирование
+                        taxes_df,           # DataFrame вкладки Налоги
+                        other_income_raw,   # скрытые расчёты налогов: Прочие доходы (расходы) в тек. ценах
+                        tax_rates_by_year): # ставки налога на прибыль по годам (%)
+    """
+    Блок Прибыль.
+    Все строки — в постоянных ценах (/ дефлятор).
+    Источники берутся из итоговых DataFrame других вкладок.
+    """
+
+    sorted_years = sorted(years)
+
+    # ── Вспомогательная функция — извлечь строку из DataFrame по названию ──
+    # Замените функцию get_row на get_last_row для выручки:
+    def get_last_row(df, name):
+        """Возвращает ПОСЛЕДНЕЕ вхождение строки с данным названием."""
+        if df is None or df.empty:
+            return {}
+        rows = df[df["Наименование статьи"] == name]
+        if rows.empty:
+            return {}
+        return rows.iloc[-1].to_dict()  # ← iloc[-1] вместо iloc[0]
+
+    # ── Источники ────────────────────────────────────────────────────
+    revenue_row = get_last_row(sales_df, "Выручка без НДС")  # последнее вхождение (индекс 29 — итоговая)
+    opex_row = get_last_row(opex_df, "Операционные издержки без амортизации без НДС")
+    amo_row = get_last_row(fixed_assets_df, "Амортизационные отчисления")
+    interest_row = get_last_row(finance_df, "выплата процентов")
+    prop_tax_row = get_last_row(taxes_df, "Прочие налоги (налог на имущество)")
+    income_tax_row = get_last_row(taxes_df, "Налог на прибыль")
+
+    # Дивиденды из ОДДС 4322 (отрицательное значение)
+    opc_4322 = extract_row_by_code(cash_flow_df, 4322) if cash_flow_df is not None else {}
+
+    # ── Строки таблицы ────────────────────────────────────────────────
+    rows = []
+
+    def r(name):
+        return {"Наименование статьи": name}
+
+    row_revenue      = r("Выручка без НДС")
+    row_opex         = r("Операционные издержки без амортизации без НДС")
+    row_ebitda       = r("Доход до выплаты процентов, налогов и амортизации (EBITDA)")
+    row_amo          = r("Амортизация")
+    row_ebit         = r("Доход до выплаты процентов и налогов (EBIT)")
+    row_interest     = r("Проценты")
+    row_prop_tax     = r("Налоги, уменьшающие базу налога на прибыль")
+    row_other_inc    = r("Прочие доходы (расходы)")
+    row_taxable      = r("Налогооблагаемая прибыль")
+    row_income_tax   = r("Налог на прибыль")
+    row_net_profit   = r("Чистая прибыль")
+    row_dividends    = r("Дивиденды")
+    row_retained     = r("Нераспределённая прибыль (убыток)")
+
+    for year in sorted_years:
+        defl = deflators.get(year, 1.0) or 1.0
+
+        # Из DataFrame других вкладок (уже в постоянных ценах)
+        rev     = float(revenue_row.get(year, 0.0)  or 0.0)
+        opex    = float(opex_row.get(year, 0.0)     or 0.0)
+        amo     = float(amo_row.get(year, 0.0)      or 0.0)
+        intr    = float(interest_row.get(year, 0.0) or 0.0)
+        ptax    = float(prop_tax_row.get(year, 0.0) or 0.0)
+
+        # Прочие доходы (расходы): из скрытых расчётов налогов / дефлятор
+        other_inc = float(other_income_raw.get(year, 0.0) or 0.0) / defl
+
+        # Расчёт П&У
+        ebitda      = rev - opex
+        ebit        = ebitda - amo
+        taxable     = ebit - intr - ptax - other_inc
+
+        rate_y      = float(tax_rates_by_year.get(year, 20.0)) / 100.0
+        inc_tax     = max(0.0, taxable * rate_y) if taxable > 0 else 0.0
+        net_profit = taxable - inc_tax
+
+        # Дивиденды:
+        #   с 2025 года — 19% от чистой прибыли, если она положительная, иначе 0
+        #   до 2025 года — из ОДДС 4322 (со знаком минус) / дефлятор
+        if year >= 2025:
+            dividends = net_profit * 0.19 if net_profit > 0 else 0.0
+        else:
+            dividends = -float(opc_4322.get(year, 0.0) or 0.0) / defl
+        retained = net_profit - dividends
+
+        row_revenue[year]    = rev
+        row_opex[year]       = opex
+        row_ebitda[year]     = ebitda
+        row_amo[year]        = amo
+        row_ebit[year]       = ebit
+        row_interest[year]   = intr
+        row_prop_tax[year]   = ptax
+        row_other_inc[year]  = other_inc
+        row_taxable[year]    = taxable
+        row_income_tax[year] = inc_tax
+        row_net_profit[year] = net_profit
+        row_dividends[year]  = dividends
+        row_retained[year]   = retained
+
+    rows.extend([
+        row_revenue,
+        row_opex,
+        row_ebitda,
+        row_amo,
+        row_ebit,
+        row_interest,
+        row_prop_tax,
+        row_other_inc,
+        row_taxable,
+        row_income_tax,
+        row_net_profit,
+        row_dividends,
+        row_retained,
+    ])
+
+    # Сохраняем ключевые строки в session_state для других блоков
+    st.session_state.profit_net       = {y: row_net_profit.get(y, 0.0)  for y in sorted_years}
+    st.session_state.profit_ebitda    = {y: row_ebitda.get(y, 0.0)      for y in sorted_years}
+    st.session_state.profit_ebit      = {y: row_ebit.get(y, 0.0)        for y in sorted_years}
+    st.session_state.profit_taxable   = {y: row_taxable.get(y, 0.0)     for y in sorted_years}
+    st.session_state.profit_retained  = {y: row_retained.get(y, 0.0)    for y in sorted_years}
+
+    return pd.DataFrame(rows)
+
+def build_cashflow_matrix(years, sales_df, opex_df, taxes_df, invest_df):
+    """
+    Три варианта ДП от операционной и инвестиционной деятельности:
+    'с проектом', 'без проекта', 'самого проекта'.
+    Все данные уже в постоянных ценах (из соответствующих DataFrame).
+    """
+
+    sorted_years = sorted(years)
+
+    # ── Вспомогательные функции ──────────────────────────────────────
+
+    def get_last_row(df, name):
+        """Последнее вхождение строки по названию."""
+        if df is None or df.empty:
+            return {}
+        rows = df[df["Наименование статьи"] == name]
+        if rows.empty:
+            return {}
+        return rows.iloc[-1].to_dict()
+
+    def get_first_row(df, name):
+        if df is None or df.empty:
+            return {}
+        rows = df[df["Наименование статьи"] == name]
+        if rows.empty:
+            return {}
+        return rows.iloc[0].to_dict()
+
+    def val(row_dict, year):
+        return float(row_dict.get(year, 0.0) or 0.0)
+
+    # ── Источники из DataFrame ────────────────────────────────────────
+
+    rev_row = get_last_row(sales_df, "Выручка с НДС")
+    liq_row = get_first_row(sales_df, "Ликвидационная стоимость")
+    taxes_row = get_last_row(taxes_df, "Итого налоги")
+    nwc_inv_row = dict(zip(range(2016, 2036), [
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        -601_941, -370_680,
+        0, 0, 0, 0, 0, 0, 0
+    ]))
+    capex_row = get_first_row(invest_df, "Инвестиции во внеоборотные активы (итого)")
+
+    # Операционные издержки без амортизации и акциза, c НДС — фиксированные значения
+    _opex_nodep_vat_fixed = dict(zip(range(2016, 2036), [
+        0, 6_985_256, 22_093_950, 33_063_144,
+        26_371_432, 49_838_854, 35_881_312, 46_249_458,
+        39_074_848, 49_915_559, 49_931_118, 49_941_268,
+        94_370_159, 115_162_906, 115_141_342, 115_123_585,
+        115_108_948, 115_096_868, 115_086_885, 115_078_624,
+    ]))
+    # opex_row используется как положительное число, знак минус ставится при расчёте
+    opex_row = _opex_nodep_vat_fixed
+    # Год «заморозки» для варианта «без проекта»
+    freeze_rev_year   = 2025   # выручка фиксируется с 2026
+    freeze_opex_year  = 2026   # опex фиксируется с 2027
+    freeze_taxes_year = 2027   # налоги фиксируются с 2028
+
+    # ── Строим три таблицы ────────────────────────────────────────────
+
+    def make_rows(label):
+        """Создаёт шаблон строк с меткой для идентификации таблицы."""
+        def r(name):
+            return {"Наименование статьи": name, "_table": label}
+        return r
+
+    # ── Таблица 1: «с проектом» ───────────────────────────────────────
+
+    r1 = make_rows("with")
+    t1_inflow      = r1("Приток денежных средств")
+    t1_revenue     = r1("Выручка с НДС")
+    t1_liq         = r1("Ликвидационная стоимость")
+    t1_outflow     = r1("Отток денежных средств")
+    t1_opex        = r1("Операционные издержки без амортизации и акциза, c НДС")
+    t1_taxes       = r1("Налоги")
+    t1_nwc         = r1("Инвестиции в прирост чистого оборотного капитала")
+    t1_capex       = r1("Инвестиции в основной капитал")
+    t1_saldo       = r1("Сальдо ДП от операционной и инвестиционной деятельности")
+    t1_cum         = r1("Накопленное сальдо ДП от операционной и инвестиционной деятельности")
+
+    cum1 = 0.0
+    for year in sorted_years:
+        rev   =  val(rev_row,     year)
+        liq   =  val(liq_row,     year)
+        opex  = -val(opex_row,    year)
+        taxes = -val(taxes_row,   year)
+        nwc   =  val(nwc_inv_row, year)
+        capex = -val(capex_row,   year)
+
+        saldo = rev + liq + opex + taxes + nwc + capex
+        cum1 += saldo
+
+        t1_inflow[year]  = None
+        t1_revenue[year] = rev
+        t1_liq[year]     = liq
+        t1_outflow[year] = None
+        t1_opex[year]    = opex
+        t1_taxes[year]   = taxes
+        t1_nwc[year]     = nwc
+        t1_capex[year]   = capex
+        t1_saldo[year]   = saldo
+        t1_cum[year]     = cum1
+
+    # ── Таблица 2: «без проекта» ──────────────────────────────────────
+
+    r2 = make_rows("without")
+    t2_inflow  = r2("Приток денежных средств")
+    t2_revenue = r2("Выручка с НДС")
+    t2_liq     = r2("Ликвидационная стоимость")
+    t2_outflow = r2("Отток денежных средств")
+    t2_opex    = r2("Операционные издержки без амортизации и акциза, c НДС")
+    t2_taxes   = r2("Налоги")
+    t2_nwc     = r2("Инвестиции в прирост чистого оборотного капитала")
+    t2_capex   = r2("Инвестиции в основной капитал")
+    t2_saldo   = r2("Сальдо ДП от операционной и инвестиционной деятельности")
+    t2_cum     = r2("Накопленное сальдо ДП от операционной и инвестиционной деятельности")
+
+    # ── Фиксированные значения opex для таблицы 2 ────────────────────
+    # С 2027 фиксируется на уровне 2026 (49_941_268)
+    _opex_t2_fixed = dict(zip(range(2016, 2036), [
+        0, 6_985_256, 22_093_950, 33_063_144,
+        26_371_432, 49_838_854, 35_881_312, 46_249_458,
+        39_074_848, 49_915_559, 49_931_118, 49_941_268,
+        49_941_268, 49_941_268, 49_941_268, 49_941_268,
+        49_941_268, 49_941_268, 49_941_268, 49_941_268,
+    ]))
+
+    # Значения «заморозки»
+    rev_freeze = val(rev_row, freeze_rev_year)
+    taxes_freeze = val(taxes_row, freeze_taxes_year)
+    # opex_freeze больше не нужен — используем _opex_t2_fixed
+
+    cum2 = 0.0
+    for year in sorted_years:
+        # Выручка: с 2026 фиксируется на уровне 2025
+        rev = rev_freeze if year >= freeze_rev_year + 1 else val(rev_row, year)
+        # Ликвидационная стоимость = 0
+        liq = 0.0
+        # Опex: с 2027 фиксируется на уровне 2026 — берём из _opex_t2_fixed
+        opex = -float(_opex_t2_fixed.get(year, 0.0))
+        # Налоги: с 2028 фиксируется на уровне 2027
+        taxes = -(taxes_freeze if year >= freeze_taxes_year + 1 else val(taxes_row, year))
+        # ЧОК: с 2027 = 0
+        nwc = val(nwc_inv_row, year) if year <= freeze_opex_year else 0.0
+        # Капex: с 2027 = 0
+        capex = -(val(capex_row, year) if year <= freeze_opex_year else 0.0)
+
+        saldo = rev + liq + opex + taxes + nwc + capex
+        cum2 += saldo
+
+        t2_inflow[year] = None
+        t2_revenue[year] = rev
+        t2_liq[year] = liq
+        t2_outflow[year] = None
+        t2_opex[year] = opex
+        t2_taxes[year] = taxes
+        t2_nwc[year] = nwc
+        t2_capex[year] = capex
+        t2_saldo[year] = saldo
+        t2_cum[year] = cum2
+
+    # ── Таблица 3: «самого проекта» ───────────────────────────────────
+
+    r3 = make_rows("project")
+    t3_inflow  = r3("Приток денежных средств")
+    t3_revenue = r3("Выручка с НДС")
+    t3_liq     = r3("Ликвидационная стоимость")
+    t3_outflow = r3("Отток денежных средств")
+    t3_opex    = r3("Операционные издержки без амортизации и акциза, c НДС")
+    t3_taxes   = r3("Налоги")
+    t3_nwc     = r3("Инвестиции в прирост чистого оборотного капитала")
+    t3_capex   = r3("Инвестиции в основной капитал")
+    t3_saldo   = r3("Сальдо ДП от операционной и инвестиционной деятельности")
+    t3_cum     = r3("Накопленное сальдо ДП от операционной и инвестиционной деятельности")
+
+    cum3 = 0.0
+    for year in sorted_years:
+        rev   = t1_revenue[year] - t2_revenue[year]
+        liq   = t1_liq[year]     - t2_liq[year]
+        opex  = t1_opex[year]    - t2_opex[year]
+        taxes = t1_taxes[year]   - t2_taxes[year]
+        nwc   = t1_nwc[year]     - t2_nwc[year]
+        capex = t1_capex[year]   - t2_capex[year]
+
+        saldo = rev + liq + opex + taxes + nwc + capex
+        cum3 += saldo
+
+        t3_inflow[year]  = None
+        t3_revenue[year] = rev
+        t3_liq[year]     = liq
+        t3_outflow[year] = None
+        t3_opex[year]    = opex
+        t3_taxes[year]   = taxes
+        t3_nwc[year]     = nwc
+        t3_capex[year]   = capex
+        t3_saldo[year]   = saldo
+        t3_cum[year]     = cum3
+
+    # ── Сохраняем для DCF ─────────────────────────────────────────────
+    st.session_state.cf_saldo_with    = {y: t1_saldo.get(y, 0.0) for y in sorted_years}
+    st.session_state.cf_saldo_without = {y: t2_saldo.get(y, 0.0) for y in sorted_years}
+    st.session_state.cf_saldo_project = {y: t3_saldo.get(y, 0.0) for y in sorted_years}
+
+    # ── Три отдельных DataFrame ───────────────────────────────────────
+    def to_df(rows):
+        df = pd.DataFrame(rows)
+        df = df.drop(columns=["_table"], errors="ignore")
+        return df
+
+    df1 = to_df([t1_inflow, t1_revenue, t1_liq,
+                 t1_outflow, t1_opex, t1_taxes, t1_nwc, t1_capex,
+                 t1_saldo, t1_cum])
+
+    df2 = to_df([t2_inflow, t2_revenue, t2_liq,
+                 t2_outflow, t2_opex, t2_taxes, t2_nwc, t2_capex,
+                 t2_saldo, t2_cum])
+
+    df3 = to_df([t3_inflow, t3_revenue, t3_liq,
+                 t3_outflow, t3_opex, t3_taxes, t3_nwc, t3_capex,
+                 t3_saldo, t3_cum])
+
+    return df1, df2, df3
+
+def build_social_eff_matrix(years, taxes_df, finance_df,
+                             cf_saldo_with,
+                             price_effects, indirect_effects,
+                             other_tax_effects,
+                             discount_rate):
+    """
+    ДП общественной эффективности.
+    cf_saldo_with  — dict {year: value} из таблицы 1 блока ДП
+    price_effects  — dict {year: value} ввод пользователя
+    indirect_effects — dict {year: value} ввод пользователя
+    other_tax_effects — dict {year: value} ввод пользователя
+    discount_rate  — ставка дисконтирования (доли, напр. 0.10)
+    """
+
+    sorted_years = sorted(years)
+
+    def get_first_row(df, name):
+        if df is None or df.empty:
+            return {}
+        rows = df[df["Наименование статьи"] == name]
+        if rows.empty:
+            return {}
+        return rows.iloc[0].to_dict()
+
+    def get_last_row(df, name):
+        if df is None or df.empty:
+            return {}
+        rows = df[df["Наименование статьи"] == name]
+        if rows.empty:
+            return {}
+        return rows.iloc[-1].to_dict()
+
+    def v(d, year):
+        return float(d.get(year, 0.0) or 0.0)
+
+    # Источники из taxes_df
+    vat_row      = get_first_row(taxes_df, "НДС в бюджет")
+    inc_tax_row  = get_first_row(taxes_df, "Налог на прибыль")
+    excise_row   = get_first_row(taxes_df, "Акциз")
+    prop_tax_row = get_first_row(taxes_df, "Прочие налоги (налог на имущество)")
+
+    # Источник из finance_df — бюджетное финансирование (поступление)
+    budget_row   = get_first_row(finance_df, "поступление")   # уточните точное название
+
+    rows = []
+
+    def r(name):
+        return {"Наименование статьи": name}
+
+    row_comm_saldo      = r("Сальдо ДП для расчета коммерческой эффективности")
+
+    row_tax_effects_hdr = r("Налоговые эффекты")
+    row_amurstal_hdr    = r("Налоговые эффекты Амурстали")
+    row_vat             = r("НДС")
+    row_inc_tax         = r("Налог на прибыль")
+    row_excise          = r("Акциз")
+    row_prop_tax        = r("Налог на имущество")
+    row_tax_amurstal    = r("Итого налоговые эффекты Амурстали")
+    row_other_tax       = r("Прочие налоговые эффекты")
+    row_tax_total       = r("Налоговые эффекты")
+
+    row_price_eff       = r("Ценовые эффекты")
+    row_indirect_eff    = r("Косвенные эффекты")
+
+    row_saldo_soc       = r("Сальдо ДП для расчета общественной эффективности (без дисконтирования)")
+    row_soc_disc        = r("ДП ОЭ с дисконтированием")
+
+    row_disc_hdr        = r("Расчет дисконтированных ДП")
+    row_comm_no_gp      = r("ДП коммерческой эффективности без ГП")
+    row_comm_no_gp_disc = r("ДП коммерческой эффективности без ГП (с дисконтированием)")
+    row_comm_gp         = r("ДП коммерческой эффективности с ГП")
+    row_comm_gp_disc    = r("ДП коммерческой эффективности с ГП (с дисконтированием)")
+
+    row_disc_eff_hdr    = r("Расчет дисконтированных эффектов")
+    row_tax_amurstal_d  = r("Налоговые эффекты Амурстали (дисконт.)")
+    row_other_tax_d     = r("Прочие налоговые эффекты (дисконт.)")
+    row_indirect_d      = r("Косвенные эффекты (дисконт.)")
+    row_price_d         = r("Ценовые эффекты (дисконт.)")
+
+    for i, year in enumerate(sorted_years):
+        n = i + 1   # номер года от 1
+        disc_factor = (1 + discount_rate) ** n
+
+        # ── Коммерческое сальдо ───────────────────────────────────────
+        comm_saldo = v(cf_saldo_with, year)
+        row_comm_saldo[year] = comm_saldo
+
+        # ── Налоговые эффекты Амурстали ───────────────────────────────
+        vat_val      = v(vat_row,      year)
+        inc_tax_val  = v(inc_tax_row,  year)
+        excise_val   = v(excise_row,   year)
+        prop_tax_val = v(prop_tax_row, year)
+        tax_amurstal = vat_val + inc_tax_val + excise_val + prop_tax_val
+
+        row_tax_effects_hdr[year] = None
+        row_amurstal_hdr[year]    = None
+        row_vat[year]             = vat_val
+        row_inc_tax[year]         = inc_tax_val
+        row_excise[year]          = excise_val
+        row_prop_tax[year]        = prop_tax_val
+        row_tax_amurstal[year]    = tax_amurstal
+
+        # ── Прочие налоговые эффекты (ввод) ──────────────────────────
+        other_tax = v(other_tax_effects, year)
+        row_other_tax[year] = other_tax
+
+        # ── Итого налоговые эффекты ───────────────────────────────────
+        row_tax_total[year] = tax_amurstal + other_tax
+
+        # ── Ценовые и косвенные эффекты (ввод) ───────────────────────
+        price_eff    = v(price_effects,    year)
+        indirect_eff = v(indirect_effects, year)
+        row_price_eff[year]    = price_eff
+        row_indirect_eff[year] = indirect_eff
+
+        # ── Сальдо общественной эффективности ────────────────────────
+        saldo_soc = comm_saldo + (tax_amurstal + other_tax) + price_eff + indirect_eff
+        row_saldo_soc[year] = saldo_soc
+        row_soc_disc[year]  = saldo_soc / disc_factor
+
+        # ── ДП коммерческой эффективности ────────────────────────────
+        budget_val = v(budget_row, year)
+
+        row_disc_hdr[year]        = None
+        row_comm_no_gp[year]      = comm_saldo
+        row_comm_no_gp_disc[year] = comm_saldo / disc_factor
+        row_comm_gp[year]         = comm_saldo + budget_val
+        row_comm_gp_disc[year]    = (comm_saldo + budget_val) / disc_factor
+
+        # ── Дисконтированные эффекты ──────────────────────────────────
+        row_disc_eff_hdr[year]   = None
+        row_tax_amurstal_d[year] = tax_amurstal    / disc_factor
+        row_other_tax_d[year]    = other_tax        / disc_factor
+        row_indirect_d[year]     = indirect_eff     / disc_factor
+        row_price_d[year]        = price_eff        / disc_factor
+
+    rows.extend([
+        row_comm_saldo,
+        row_tax_effects_hdr,
+        row_amurstal_hdr,
+        row_vat, row_inc_tax, row_excise, row_prop_tax,
+        row_tax_amurstal,
+        row_other_tax,
+        row_tax_total,
+        row_price_eff,
+        row_indirect_eff,
+        row_saldo_soc,
+        row_soc_disc,
+        row_disc_hdr,
+        row_comm_no_gp,
+        row_comm_no_gp_disc,
+        row_comm_gp,
+        row_comm_gp_disc,
+        row_disc_eff_hdr,
+        row_tax_amurstal_d,
+        row_other_tax_d,
+        row_indirect_d,
+        row_price_d,
+    ])
+
+    return pd.DataFrame(rows)
+
+def build_social_eff_without_matrix(years, taxes_df, cf_saldo_without,
+                                     price_effects, indirect_effects,
+                                     other_tax_effects, discount_rate):
+    """
+    ДП общественной эффективности (без проекта).
+    cf_saldo_without — dict {year: value} из таблицы 2 блока ДП
+    """
+    sorted_years = sorted(years)
+
+    def get_first_row(df, name):
+        if df is None or df.empty:
+            return {}
+        rows = df[df["Наименование статьи"] == name]
+        if rows.empty:
+            return {}
+        return rows.iloc[0].to_dict()
+
+    def v(d, year):
+        return float(d.get(year, 0.0) or 0.0)
+
+    # Источники из taxes_df
+    vat_row      = get_first_row(taxes_df, "НДС в бюджет")
+    inc_tax_row  = get_first_row(taxes_df, "Налог на прибыль")
+    excise_row   = get_first_row(taxes_df, "Акциз")
+    prop_tax_row = get_first_row(taxes_df, "Прочие налоги (налог на имущество)")
+
+    FREEZE_TAX_YEAR = 2027
+
+    def freeze(row_dict, year, freeze_year=FREEZE_TAX_YEAR):
+        """Возвращает значение года, но не выше freeze_year."""
+        lookup_year = min(year, freeze_year)
+        return float(row_dict.get(lookup_year, 0.0) or 0.0)
+
+    def r(name):
+        return {"Наименование статьи": name}
+
+    row_comm_saldo      = r("Сальдо ДП для расчета коммерческой эффективности")
+    row_tax_effects_hdr = r("Налоговые эффекты")
+    row_amurstal_hdr    = r("Налоговые эффекты Амурстали")
+    row_vat             = r("НДС")
+    row_inc_tax         = r("Налог на прибыль")
+    row_excise          = r("Акциз")
+    row_prop_tax        = r("Налог на имущество")
+    row_tax_amurstal    = r("Итого налоговые эффекты Амурстали")
+    row_other_tax       = r("Прочие налоговые эффекты")
+    row_price_eff       = r("Ценовые эффекты")
+    row_indirect_eff    = r("Косвенные эффекты")
+
+    row_disc_dp_hdr     = r("Расчет дисконтированных ДП")
+    row_comm_dp         = r("ДП коммерческой эффективности")
+    row_comm_dp_disc    = r("ДП коммерческой эффективности (с дисконтированием)")
+    row_soc_dp          = r("ДП общественной эффективности")
+    row_soc_dp_disc     = r("ДП общественной эффективности (с дисконтированием)")
+
+    row_disc_eff_hdr    = r("Расчет дисконтированных эффектов")
+    row_tax_amurstal_d  = r("Налоговые эффекты Амурстали (дисконт.)")
+    row_other_tax_d     = r("Налоговые эффекты (дисконт.)")
+    row_indirect_d      = r("Косвенные эффекты (дисконт.)")
+    row_price_d         = r("Ценовые эффекты (дисконт.)")
+
+    for i, year in enumerate(sorted_years):
+        n = i + 1
+        disc_factor = (1 + discount_rate * 100) ** n
+
+        # ── Коммерческое сальдо (из таблицы 2) ───────────────────────
+        comm_saldo = v(cf_saldo_without, year)
+        row_comm_saldo[year] = comm_saldo
+
+        # ── Налоговые эффекты Амурстали ───────────────────────────────
+        vat_val = freeze(vat_row, year)
+        inc_tax_val = freeze(inc_tax_row, year)
+        excise_val = freeze(excise_row, year)
+        prop_tax_val = freeze(prop_tax_row, year)
+        tax_amurstal = vat_val + inc_tax_val + excise_val + prop_tax_val
+
+        row_tax_effects_hdr[year] = None
+        row_amurstal_hdr[year]    = None
+        row_vat[year]             = vat_val
+        row_inc_tax[year]         = inc_tax_val
+        row_excise[year]          = excise_val
+        row_prop_tax[year]        = prop_tax_val
+        row_tax_amurstal[year]    = tax_amurstal
+
+        # ── Прочие налоговые эффекты (ввод) ───────────────────────────
+        other_tax    = v(other_tax_effects, year)
+        price_eff    = v(price_effects,     year)
+        indirect_eff = v(indirect_effects,  year)
+
+        row_other_tax[year]    = other_tax
+        row_price_eff[year]    = price_eff
+        row_indirect_eff[year] = indirect_eff
+
+        # ── Расчет дисконтированных ДП ────────────────────────────────
+        row_disc_dp_hdr[year]  = None
+
+        row_comm_dp[year]      = comm_saldo
+        row_comm_dp_disc[year] = comm_saldo / disc_factor
+
+        # ДП общ эфф без проекта = сальдо + налоговые эффекты (из таблицы 2)
+        soc_dp = comm_saldo + tax_amurstal + other_tax
+        row_soc_dp[year]      = soc_dp
+        row_soc_dp_disc[year] = soc_dp / disc_factor
+
+        # ── Расчет дисконтированных эффектов ──────────────────────────
+        row_disc_eff_hdr[year]  = None
+        row_tax_amurstal_d[year] = tax_amurstal / disc_factor
+        row_other_tax_d[year]   = other_tax     / disc_factor
+        row_indirect_d[year]    = indirect_eff  / disc_factor
+        row_price_d[year]       = price_eff     / disc_factor
+
+    rows = [
+        row_comm_saldo,
+        row_tax_effects_hdr,
+        row_amurstal_hdr,
+        row_vat, row_inc_tax, row_excise, row_prop_tax,
+        row_tax_amurstal,
+        row_other_tax,
+        row_price_eff,
+        row_indirect_eff,
+        row_disc_dp_hdr,
+        row_comm_dp,
+        row_comm_dp_disc,
+        row_soc_dp,
+        row_soc_dp_disc,
+        row_disc_eff_hdr,
+        row_tax_amurstal_d,
+        row_other_tax_d,
+        row_indirect_d,
+        row_price_d,
+    ]
 
     return pd.DataFrame(rows)
 
@@ -991,14 +2139,14 @@ def main():
     if 'volumes_temp' not in st.session_state:
         _years_vol = list(range(2016, 2036))
         _vol_zagotovka = [
-            0.000, 0.059, 0.1936, 0.2243, 0.2501, 0.2786, 0.3275, 0.4233,
-            0.4233, 0.5216, 0.5216, 0.5216, 1.50, 1.745, 1.745, 1.745,
-            1.745, 1.745, 1.745, 1.745
+            0.0, 0.05915952756, 0.1936129993, 0.2242683908, 0.2500834574, 0.2785875934, 0.3275286571, 0.423259529,
+            0.423259529, 0.521559, 0.521559, 0.521559, 1.5, 1.745, 1.745, 1.745,
+            1.745, 1.745, 1.745, 1.745,
         ]
         _vol_sortvoy = [
-            0.000, 0.051, 0.166, 0.193, 0.215, 0.239, 0.281, 0.364,
-            0.364, 0.364, 0.364, 0.364, 0.364, 0.455, 0.455, 0.455,
-            0.455, 0.455, 0.455, 0.455
+            0.0, 0.05084047244, 0.1663870007, 0.1927316092, 0.2149165426, 0.2394124066, 0.2814713429, 0.363740471,
+            0.363740471, 0.363740471, 0.363740471, 0.363740471, 0.363740471, 0.455, 0.455, 0.455,
+            0.455, 0.455, 0.455, 0.455,
         ]
         st.session_state.volumes_temp = {
             _OKPD_KEY: {
@@ -1055,25 +2203,30 @@ def main():
         _years_cp = list(range(2016, 2036))
 
         _prices_lom = [
-                33.7, 33.2, 31.7, 30.3, 21.7, 39.3, 22.6, 28.5,
-                22.3, 28.5, 28.5, 28.5, 28.5, 28.5, 28.5, 28.5,
-                28.5, 28.5, 28.5, 28.5
-            ]
+            33.7482073, 33.18081536, 31.73375608, 30.29186338, 21.70583808,
+            39.2817161, 22.561056, 28.495, 22.29823426, 28.495, 28.495,
+            28.495, 28.495, 28.495, 28.495, 28.495, 28.495, 28.495,
+            28.495, 28.495,
+        ]
         _prices_gbzh = [
-                26.8, 26.4, 25.2, 24.1, 20.9, 42.9, 20.4, 26.2,
-                20.5, 26.2, 26.2, 26.2, 26.2, 26.2, 26.2, 26.2,
-                26.2, 26.2, 26.2, 26.2
-            ]
+            26.84428832, 26.39296856, 25.24193627, 30.29186338,
+            20.93048007, 42.91688574, 20.40372, 26.16,
+            20.52325044, 26.16, 26.16, 26.16,
+            26.16, 26.16, 26.16, 26.16,
+            26.16, 26.16, 26.16, 26.16,
+        ]
         _prices_gaz = [
-                0.0072, 0.0071, 0.0068, 0.0065, 0.0061, 0.0057, 0.0051, 0.0047,
-                0.0047, 0.0047, 0.0047, 0.0047, 0.0047, 0.0047, 0.0047, 0.0047,
-                0.0047, 0.0047, 0.0047, 0.0047
-            ]
+            0.0072264824, 0.0071049871, 0.0067951292, 0.0064863777,
+            0.0060518545, 0.0056947911, 0.0050728586, 0.0047256,
+            0.0047181289, 0.0047256, 0.0047256, 0.0047256,
+            0.0047256, 0.0047256, 0.0047256, 0.0047256,
+            0.0047256, 0.0047256, 0.0047256, 0.0047256,
+        ]
         _prices_electro = [
-                6.2, 6.0, 5.8, 5.8, 5.7, 5.6, 5.4, 5.2,
-                5.6, 5.2, 5.2, 5.2, 5.2, 5.2, 5.2, 5.2,
-                5.2, 5.2, 5.2, 5.2
-            ]
+            6.150119021, 6.046720107, 5.78301464, 5.845948821, 5.738052351, 5.62271992, 5.3517528, 5.2164,
+            5.571230471, 5.2164, 5.2164, 5.2164, 5.2164, 5.2164, 5.2164, 5.2164,
+            5.2164, 5.2164, 5.2164, 5.2164,
+        ]
 
         st.session_state.cost_prices = {
                 "Лом и скраб": dict(zip(_years_cp, _prices_lom)),
@@ -1091,25 +2244,25 @@ def main():
         _years_cv = list(range(2016, 2036))
 
         _vol_lom = [
-                0.00, 0.11, 0.38, 0.62, 0.62, 0.76, 0.79, 0.83,
-                0.83, 0.80, 0.80, 0.80, 0.80, 0.80, 0.80, 0.80,
-                0.80, 0.80, 0.80, 0.80
-            ]
+            0.0, 0.110805, 0.384124, 0.6249402, 0.6249402, 0.7583544, 0.7864416, 0.83,
+            0.83, 0.83, 0.83, 0.83, 0.83, 0.83, 0.83, 0.83,
+            0.83, 0.83, 0.83, 0.83,
+        ]
         _vol_gbzh = [
                 0.000, 0.000, 0.000, 0.000, 0.000, 0.000, 0.150, 0.150,
-                0.150, 0.150, 0.150, 0.150, 0.798, 1.595, 1.595, 1.595,
+                0.150, 0.150, 0.150, 0.150, 0.7975, 1.595, 1.595, 1.595,
                 1.595, 1.595, 1.595, 1.600
             ]
         _vol_gaz = [
-                0.0, 2.5, 8.7, 14.1, 14.1, 17.1, 17.7, 18.7,
-                18.7, 18.7, 18.7, 18.7, 20.8, 41.6, 41.6, 41.6,
-                41.6, 41.6, 41.6, 41.6
-            ]
+            0.0, 2.4979185, 8.6594508, 14.08826034, 14.08826034, 17.09586648, 17.72904672, 18.711,
+            18.711, 18.711, 18.711, 18.711, 20.79, 41.58, 41.58, 41.58,
+            41.58, 41.58, 41.58, 41.58,
+        ]
         _vol_electro = [
-                0.0, 0.1, 0.3, 0.6, 0.6, 0.7, 0.7, 0.7,
-                0.7, 0.7, 0.7, 0.7, 0.8, 1.6, 1.6, 1.6,
-                1.6, 1.6, 1.6, 1.6
-            ]
+            0.0, 0.0978021, 0.33904728, 0.551603844, 0.551603844, 0.669361968, 0.694153152, 0.7326,
+            0.7326, 0.7326, 0.7326, 0.7326, 0.814, 1.628, 1.628, 1.628,
+            1.628, 1.628, 1.628, 1.628,
+        ]
 
         st.session_state.cost_volumes = {
                 "Лом и скраб": dict(zip(_years_cv, _vol_lom)),
@@ -1122,16 +2275,15 @@ def main():
 
         _cslyab = [
                 0, 0, 0, 0, 0, 0,
-                442, 520, 483, 394, 400, 400,
+                442, 520, 482.5777778, 394, 400, 400,
                 400, 400, 400, 400, 400, 400,
                 400, 400
             ]
         _dollar = [
-                0.0, 58.3, 62.7, 64.7, 72.1, 73.7,
-                68.5, 85.2, 92.5, 84.2, 84.2, 84.2,
-                84.2, 84.2, 84.2, 84.2, 84.2, 84.2,
-                84.2, 84.2
-            ]
+            0.0, 58.3086, 62.6906, 64.6625, 72.126, 73.6824, 68.4829, 85.163,
+            92.5212, 84.1632, 84.1632, 84.1632, 84.1632, 84.1632, 84.1632, 84.1632,
+            84.1632, 84.1632, 84.1632, 84.1632,
+        ]
 
         st.session_state.cslyab_data = {
                 "ЦСЛЯБ": dict(zip(_years_cs, _cslyab)),
@@ -1174,6 +2326,14 @@ def main():
 
     if "property_tax_rate" not in st.session_state:
         st.session_state.property_tax_rate = 2
+
+    if "tax_rates_by_year" not in st.session_state:
+        _years_for_tax = st.session_state.project_data.years \
+            if st.session_state.project_data.years else list(range(2016, 2036))
+        st.session_state.tax_rates_by_year = {y: 25.0 for y in _years_for_tax}
+
+    if "discount_rate" not in st.session_state:
+        st.session_state.project_data.discount_rate = 0.179
 
     # ========== САЙДБАР ДЛЯ ЗАГРУЗКИ ФАЙЛОВ ==========
     with st.sidebar:
@@ -1285,17 +2445,24 @@ def main():
 
             st.rerun()
 
-    tab_input, tab_reports, tab_revenue, tab_opex, tab_nwc, tab_invest, tab_fixed, tab_results, tab_export = st.tabs([
-        "📝 Ввод данных",
-        "📂 Загруженная отчетность",
-        "💰 Продажи",
-        "🏭 Операционные издержки",
-        "🔄 Оборотный капитал",
-        "🏗️ Инвестиции",
-        "🏛️ Основной капитал",
-        "📈 Анализ эффективности",
-        "💾 Экспорт"
-    ])
+    tab_input, tab_reports, tab_revenue, tab_opex, tab_nwc, tab_invest, tab_fixed, tab_finance, tab_taxes, tab_profit, tab_cf, tab_soc_eff, tab_soc_eff_without, tab_results, tab_export = st.tabs(
+        [
+            "📝 Ввод данных",
+            "📂 Загруженная отчетность",
+            "💰 Продажи",
+            "🏭 Операционные издержки",
+            "🔄 Оборотный капитал",
+            "🏗️ Инвестиции",
+            "🏛️ Основной капитал",
+            "💳 Финансирование",
+            "🧾 Налоги",
+            "📊 Прибыль",
+            "💵 ДП операц. и инвест.",
+            "🌍 ДП Общественной эффективности",
+            "🌍 ДП Общ. эфф. (без проекта)",  # ← добавлена
+            "📈 Анализ эффективности",
+            "💾 Экспорт",
+        ])
 
     with tab_input:
         # ========== БЛОК 0: ДИАПАЗОН ЛЕТ ==========
@@ -1331,14 +2498,6 @@ def main():
                 step=0.1
             ) / 100
 
-        with col2:
-            st.session_state.project_data.tax_rate = st.slider(
-                "Ставка налога на прибыль (%)",
-                min_value=0.0, max_value=30.0,
-                value=float(st.session_state.project_data.tax_rate * 100)
-                if st.session_state.project_data.tax_rate else 20.0,
-                step=0.1
-            ) / 100
 
         with col3:
             if "excise_rate" not in st.session_state:
@@ -1411,6 +2570,57 @@ def main():
                 st.session_state.vat_rates[_y] = _new
 
         if _need_vat_update:
+            st.rerun()
+
+        st.subheader("Ставка налога на прибыль по годам (%)")
+
+        years_for_tax = st.session_state.project_data.years \
+            if st.session_state.project_data.years else list(range(2016, 2036))
+
+        # Инициализируем отсутствующие годы
+        for y in years_for_tax:
+            if y not in st.session_state.tax_rates_by_year:
+                st.session_state.tax_rates_by_year[y] = 20.0
+
+        tax_row = {}
+        for y in years_for_tax:
+            tax_row[str(y)] = round(st.session_state.tax_rates_by_year.get(y, 20.0), 1)
+
+        df_tax = pd.DataFrame([tax_row])
+
+        edited_tax = st.data_editor(
+            df_tax,
+            key=f"tax_rate_editor_{hash(str(years_for_tax))}",
+            num_rows="fixed",
+            column_config={
+                str(y): st.column_config.NumberColumn(
+                    format="%.1f",
+                    min_value=0.0,
+                    max_value=100.0,
+                    step=0.1
+                )
+                for y in years_for_tax
+            },
+            use_container_width=True,
+        )
+
+        # Применяем изменения
+        need_tax_update = False
+        for y in years_for_tax:
+            new_val = float(edited_tax.iloc[0][str(y)]) / 100.0
+            old_val = st.session_state.tax_rates_by_year.get(y, 20.0) / 100.0
+            if abs(new_val - old_val) > 1e-9:
+                need_tax_update = True
+            st.session_state.tax_rates_by_year[y] = float(edited_tax.iloc[0][str(y)])
+
+        # Для совместимости с остальным кодом — единая ставка = среднее
+        st.session_state.project_data.tax_rate = (
+            sum(st.session_state.tax_rates_by_year.get(y, 20.0)
+                for y in years_for_tax) / len(years_for_tax) / 100.0
+            if years_for_tax else 0.20
+        )
+
+        if need_tax_update:
             st.rerun()
 
         # ========== БЛОК: УСРЕДНЕННАЯ СТРУКТУРА ЗАТРАТ ==========
@@ -1702,7 +2912,7 @@ def main():
             pir_share_pct = st.number_input(
                 "Доля ПИР, %",
                 min_value=0.0, max_value=100.0,
-                value=0.405,
+                value=0.4052002957,
                 step=0.001,
                 format="%.3f"
             )
@@ -2309,6 +3519,9 @@ def main():
     with tab_opex:
         st.header("🏭 Операционные издержки")
 
+        years = st.session_state.project_data.years
+        deflators = st.session_state.get("price_indices_temp", {})
+
         if not st.session_state.project_data.years:
             st.warning("Сначала укажите диапазон лет во вкладке 'Ввод данных'")
         elif not st.session_state.get('cost_prices'):
@@ -2330,24 +3543,22 @@ def main():
 
             opex_df = build_opex_matrix(
                 project_data=st.session_state.project_data,
-                years=_years,
+                years=years,
                 deflators=deflators,
                 vat_rates=st.session_state.vat_rates,
                 cost_prices=st.session_state.cost_prices,
                 cost_volumes=st.session_state.cost_volumes,
                 avg_cost_structure=st.session_state.avg_cost_structure,
-                avg_salary=st.session_state.avg_salary,
+                avg_salary=st.session_state.get("avg_salary", 0.0),
                 cslyab_data=st.session_state.cslyab_data,
-                transport_price=st.session_state.get('transport_price', 0.0),
-                transport_product=st.session_state.get('transport_product', None),
-                cash_flow_df=st.session_state.get('cash_flow_df'),
-                income_df=st.session_state.get('income_df'),
-                equipment_share=_eq_share,
-                construction_share=_con_share,
-                pir_share=_pir_share,
-                equipment_dep=st.session_state.project_data.equipment_depreciation,
-                construction_dep=st.session_state.project_data.construction_depreciation,
+                transport_price=st.session_state.transport_price,
+                transport_product=st.session_state.get("transport_product"),
+                income_df=st.session_state.get("income_df"),
+                # equipment_share, construction_share, pir_share, equipment_dep,
+                # construction_dep, cash_flow_df — УДАЛЕНЫ
             )
+
+            st.session_state.opex_df = opex_df
 
             format_dict = {year: "{:,.2f}" for year in _years}
             st.dataframe(
@@ -2564,6 +3775,654 @@ def main():
                     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
                 )
                 st.plotly_chart(fig_fa, use_container_width=True)
+
+    with tab_finance:
+        st.header("💳 Финансирование")
+
+        _years = st.session_state.project_data.years
+        cash_flow_df = st.session_state.get("cash_flow_df")
+        inv_grand_total_raw = st.session_state.get("inv_grand_total_raw")
+
+        if cash_flow_df is None:
+            st.info("Загрузите ОДДС в сайдбаре для расчёта блока финансирования.")
+        elif not _years:
+            st.warning("Сначала укажите диапазон лет во вкладке 'Ввод данных'.")
+        elif inv_grand_total_raw is None:
+            st.info("Сначала откройте вкладку '🏗️ Инвестиции' — данные рассчитаются автоматически.")
+        else:
+            currentindices = st.session_state.price_indices_temp.copy() \
+                if "price_indices_temp" in st.session_state else {}
+            deflators = {
+                year: calculate_deflator(year, st.session_state.base_year, currentindices)
+                for year in _years
+            }
+
+            finance_df = build_finance_matrix(
+                cash_flow_df=cash_flow_df,
+                years=_years,
+                deflators=deflators,
+                vat_rates=st.session_state.vat_rates,
+                inv_grand_total_raw=inv_grand_total_raw,
+            )
+
+            st.session_state.finance_df = finance_df
+
+            format_dict = {year: "{:,.2f}" for year in _years}
+
+            st.dataframe(
+                finance_df.style.format(format_dict, na_rep=""),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+            # ── Визуализация остатка долга ────────────────────────────
+            bal_row = finance_df[
+                finance_df["Наименование статьи"] == "остаток долга"
+                ]
+            svc_row = finance_df[
+                finance_df["Наименование статьи"] == "обслуживание долга"
+                ]
+
+            if not bal_row.empty:
+                bal_vals = [bal_row.iloc[0].get(y, 0.0) or 0.0 for y in _years]
+                svc_vals = [svc_row.iloc[0].get(y, 0.0) or 0.0 for y in _years]
+
+                fig_fin = go.Figure()
+                fig_fin.add_trace(go.Bar(
+                    x=_years, y=bal_vals, name="Остаток долга",
+                    marker_color="#1f77b4"
+                ))
+                fig_fin.add_trace(go.Scatter(
+                    x=_years, y=svc_vals, name="Обслуживание долга",
+                    mode="lines+markers", yaxis="y2",
+                    line=dict(color="#d62728", width=2)
+                ))
+                fig_fin.update_layout(
+                    title="Остаток долга и обслуживание долга",
+                    xaxis_title="Год",
+                    yaxis=dict(title="Остаток долга, тыс. руб."),
+                    yaxis2=dict(
+                        title="Обслуживание долга, тыс. руб.",
+                        overlaying="y", side="right"
+                    ),
+                    height=380,
+                    legend=dict(
+                        orientation="h", yanchor="bottom",
+                        y=1.02, xanchor="right", x=1
+                    ),
+                )
+                st.plotly_chart(fig_fin, use_container_width=True)
+
+    with tab_taxes:
+        st.header("🧾 Налоги")
+
+        _years = st.session_state.project_data.years
+        income_df = st.session_state.get("income_df")
+        vat_capex_raw = st.session_state.get("inv_total_raw", {})  # НДС в капзатратах = 16.7% от ВА
+        amo_total_raw = st.session_state.get("amo_total", {})
+        prop_tax_raw = st.session_state.get("prop_tax_raw", {})
+        loan_interest_raw = st.session_state.get("fin_loan_interest", {})
+
+        # Пересчитываем НДС в капзатратах из итого ВА * 0.167
+        inv_total_raw = st.session_state.get("inv_total_raw", {})
+        vat_capex_for_taxes = {y: v * 0.167 for y, v in inv_total_raw.items()}
+
+        if not _years:
+            st.warning("Сначала укажите диапазон лет во вкладке 'Ввод данных'.")
+        elif prop_tax_raw is None or len(prop_tax_raw) == 0:
+            st.info("Сначала откройте вкладку '🏛️ Основной капитал' — данные рассчитаются автоматически.")
+        else:
+            currentindices = st.session_state.price_indices_temp.copy() \
+                if "price_indices_temp" in st.session_state else {}
+            deflators = {
+                year: calculate_deflator(year, st.session_state.base_year, currentindices)
+                for year in _years
+            }
+
+            taxes_df = build_taxes_matrix(
+                years=_years,
+                deflators=deflators,
+                income_df=income_df,
+                vat_capex_raw=vat_capex_for_taxes,
+                amo_total_raw=amo_total_raw,
+                prop_tax_raw=prop_tax_raw,
+                loan_interest_raw=loan_interest_raw,
+                tax_rates_by_year=st.session_state.get("tax_rates_by_year", {}),  # ← обновлено
+                sales_df=st.session_state.get("sales_matrix_df"),
+                opex_df=st.session_state.get("opex_df"),
+            )
+
+            st.session_state.taxes_df = taxes_df
+
+            format_dict = {year: "{:,.2f}" for year in _years}
+
+            st.dataframe(
+                taxes_df.style.format(format_dict, na_rep=""),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+            # ── Визуализация структуры налогов ────────────────────────
+            vat_row = taxes_df[taxes_df["Наименование статьи"] == "НДС в бюджет"]
+            inc_row = taxes_df[taxes_df["Наименование статьи"] == "Налог на прибыль"]
+            exc_row = taxes_df[taxes_df["Наименование статьи"] == "Акциз"]
+            prop_row = taxes_df[taxes_df["Наименование статьи"] == "Прочие налоги (налог на имущество)"]
+            tot_row = taxes_df[taxes_df["Наименование статьи"] == "Итого налоги"]
+
+            if not tot_row.empty:
+                vat_vals = [vat_row.iloc[0].get(y, 0.0) or 0.0 for y in _years]
+                inc_vals = [inc_row.iloc[0].get(y, 0.0) or 0.0 for y in _years]
+                exc_vals = [exc_row.iloc[0].get(y, 0.0) or 0.0 for y in _years]
+                prop_vals = [prop_row.iloc[0].get(y, 0.0) or 0.0 for y in _years]
+
+                fig_tax = go.Figure()
+                fig_tax.add_trace(go.Bar(x=_years, y=vat_vals, name="НДС в бюджет"))
+                fig_tax.add_trace(go.Bar(x=_years, y=inc_vals, name="Налог на прибыль"))
+                fig_tax.add_trace(go.Bar(x=_years, y=exc_vals, name="Акциз"))
+                fig_tax.add_trace(go.Bar(x=_years, y=prop_vals, name="Налог на имущество"))
+                fig_tax.update_layout(
+                    barmode="stack",
+                    title="Структура налоговой нагрузки",
+                    xaxis_title="Год",
+                    yaxis_title="Тыс. руб.",
+                    height=400,
+                    legend=dict(
+                        orientation="h", yanchor="bottom",
+                        y=1.02, xanchor="right", x=1
+                    ),
+                )
+                st.plotly_chart(fig_tax, use_container_width=True)
+
+    with tab_profit:
+        st.header("📊 Прибыль")
+
+        _years = st.session_state.project_data.years
+        cash_flow_df = st.session_state.get("cash_flow_df")
+        sales_df = st.session_state.get("sales_matrix_df")
+        opex_df = st.session_state.get("opex_df")
+        fixed_df = st.session_state.get("fixed_assets_df")
+        finance_df = st.session_state.get("finance_df")
+        taxes_df = st.session_state.get("taxes_df")
+        other_income_raw = st.session_state.get("tax_other_income_raw", {})  # скрытые из налогов
+
+        missing = []
+        if sales_df is None:   missing.append("'💰 Продажи'")
+        if opex_df is None:    missing.append("'🏭 Операционные издержки'")
+        if fixed_df is None:   missing.append("'🏛️ Основной капитал'")
+        if finance_df is None: missing.append("'💳 Финансирование'")
+        if taxes_df is None:   missing.append("'🧾 Налоги'")
+
+        if not _years:
+            st.warning("Сначала укажите диапазон лет во вкладке 'Ввод данных'.")
+        elif missing:
+            st.info(f"Сначала откройте вкладки: {', '.join(missing)} — данные рассчитаются автоматически.")
+        else:
+            currentindices = st.session_state.price_indices_temp.copy() \
+                if "price_indices_temp" in st.session_state else {}
+            deflators = {
+                year: calculate_deflator(year, st.session_state.base_year, currentindices)
+                for year in _years
+            }
+
+            profit_df = build_profit_matrix(
+                years=_years,
+                deflators=deflators,
+                cash_flow_df=cash_flow_df,
+                sales_df=sales_df,
+                opex_df=opex_df,
+                fixed_assets_df=fixed_df,
+                finance_df=finance_df,
+                taxes_df=taxes_df,
+                other_income_raw=other_income_raw,
+                tax_rates_by_year=st.session_state.get("tax_rates_by_year", {}),
+            )
+
+            st.session_state.profit_df = profit_df
+
+            format_dict = {year: "{:,.2f}" for year in _years}
+
+            st.dataframe(
+                profit_df.style.format(format_dict, na_rep=""),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+            # ── Визуализация ────────────────────────────────────────────
+            ebitda_row = profit_df[
+                profit_df["Наименование статьи"] == "Доход до выплаты процентов, налогов и амортизации (EBITDA)"]
+            net_row = profit_df[profit_df["Наименование статьи"] == "Чистая прибыль"]
+            ret_row = profit_df[profit_df["Наименование статьи"] == "Нераспределённая прибыль (убыток)"]
+
+            if not net_row.empty:
+                ebitda_vals = [ebitda_row.iloc[0].get(y, 0.0) or 0.0 for y in _years]
+                net_vals = [net_row.iloc[0].get(y, 0.0) or 0.0 for y in _years]
+                ret_vals = [ret_row.iloc[0].get(y, 0.0) or 0.0 for y in _years]
+
+                fig_profit = go.Figure()
+                fig_profit.add_trace(go.Bar(
+                    x=_years, y=ebitda_vals,
+                    name="EBITDA", marker_color="#1f77b4"
+                ))
+                fig_profit.add_trace(go.Scatter(
+                    x=_years, y=net_vals,
+                    name="Чистая прибыль",
+                    mode="lines+markers",
+                    line=dict(color="#2ca02c", width=2)
+                ))
+                fig_profit.add_trace(go.Scatter(
+                    x=_years, y=ret_vals,
+                    name="Нераспределённая прибыль",
+                    mode="lines+markers",
+                    line=dict(color="#ff7f0e", width=2, dash="dot")
+                ))
+                fig_profit.add_hline(
+                    y=0, line_dash="dash", line_color="gray"
+                )
+                fig_profit.update_layout(
+                    title="Динамика прибыли",
+                    xaxis_title="Год",
+                    yaxis_title="Тыс. руб.",
+                    height=420,
+                    legend=dict(
+                        orientation="h", yanchor="bottom",
+                        y=1.02, xanchor="right", x=1
+                    ),
+                )
+                st.plotly_chart(fig_profit, use_container_width=True)
+
+    with tab_cf:
+        st.header("💵 ДП от инвестиционной и операционной деятельности")
+
+        _years = st.session_state.project_data.years
+        sales_df = st.session_state.get("sales_matrix_df")
+        opex_df = st.session_state.get("opex_df")
+        taxes_df = st.session_state.get("taxes_df")
+        invest_df = st.session_state.get("invest_df")
+
+        missing = []
+        if sales_df is None:  missing.append("'💰 Продажи'")
+        if opex_df is None:   missing.append("'🏭 Операционные издержки'")
+        if taxes_df is None:  missing.append("'🧾 Налоги'")
+        if invest_df is None: missing.append("'🏗️ Инвестиции'")
+
+        if not _years:
+            st.warning("Сначала укажите диапазон лет во вкладке 'Ввод данных'.")
+        elif missing:
+            st.info(f"Сначала откройте вкладки: {', '.join(missing)}")
+        else:
+            df1, df2, df3 = build_cashflow_matrix(
+                years=_years,
+                sales_df=sales_df,
+                opex_df=opex_df,
+                taxes_df=taxes_df,
+                invest_df=invest_df,
+            )
+
+            st.session_state.cf_df1 = df1
+            st.session_state.cf_df2 = df2
+            st.session_state.cf_df3 = df3
+
+            fmt = {year: "{:,.2f}" for year in _years}
+
+            # ── Таблица 1 ────────────────────────────────────────────────
+            st.subheader('Вариант "с проектом"')
+            st.dataframe(
+                df1.style.format(fmt, na_rep=""),
+                use_container_width=True, hide_index=True
+            )
+
+            st.divider()
+
+            # ── Таблица 2 ────────────────────────────────────────────────
+            st.subheader('Вариант "без проекта"')
+            st.dataframe(
+                df2.style.format(fmt, na_rep=""),
+                use_container_width=True, hide_index=True
+            )
+
+            st.divider()
+
+            # ── Таблица 3 ────────────────────────────────────────────────
+            st.subheader('Вариант "самого проекта"')
+            st.dataframe(
+                df3.style.format(fmt, na_rep=""),
+                use_container_width=True, hide_index=True
+            )
+
+            st.divider()
+
+            # ── График накопленного сальдо всех трёх вариантов ───────────
+            cum_with = [df1[df1["Наименование статьи"] ==
+                            "Накопленное сальдо ДП от операционной и инвестиционной деятельности"
+                            ].iloc[0].get(y, 0.0) or 0.0 for y in _years]
+
+            cum_without = [df2[df2["Наименование статьи"] ==
+                               "Накопленное сальдо ДП от операционной и инвестиционной деятельности"
+                               ].iloc[0].get(y, 0.0) or 0.0 for y in _years]
+
+            cum_project = [df3[df3["Наименование статьи"] ==
+                               "Накопленное сальдо ДП от операционной и инвестиционной деятельности"
+                               ].iloc[0].get(y, 0.0) or 0.0 for y in _years]
+
+            fig_cf = go.Figure()
+            fig_cf.add_trace(go.Scatter(
+                x=_years, y=cum_with,
+                name='С проектом', mode='lines+markers',
+                line=dict(color='#1f77b4', width=2)
+            ))
+            fig_cf.add_trace(go.Scatter(
+                x=_years, y=cum_without,
+                name='Без проекта', mode='lines+markers',
+                line=dict(color='#ff7f0e', width=2, dash='dot')
+            ))
+            fig_cf.add_trace(go.Scatter(
+                x=_years, y=cum_project,
+                name='Самого проекта', mode='lines+markers',
+                line=dict(color='#2ca02c', width=2, dash='dash')
+            ))
+            fig_cf.add_hline(y=0, line_dash='dash', line_color='gray')
+            fig_cf.update_layout(
+                title='Накопленное сальдо ДП — сравнение вариантов',
+                xaxis_title='Год',
+                yaxis_title='Тыс. руб.',
+                height=420,
+                legend=dict(
+                    orientation='h', yanchor='bottom',
+                    y=1.02, xanchor='right', x=1
+                ),
+            )
+            st.plotly_chart(fig_cf, use_container_width=True)
+
+    with tab_soc_eff:
+        st.header("🌍 ДП Общественной эффективности")
+
+        years = st.session_state.project_data.years
+        taxes_df = st.session_state.get("taxes_df")
+        finance_df = st.session_state.get("finance_df")
+        cf_saldo_with = st.session_state.get("cf_saldo_with", {})
+
+        missing = []
+        if taxes_df is None:       missing.append("'🧾 Налоги'")
+        if finance_df is None:     missing.append("'💳 Финансирование'")
+        if not cf_saldo_with:      missing.append("'💵 ДП операц. и инвест.'")
+
+        if not years:
+            st.warning("Сначала укажите диапазон лет во вкладке '📝 Ввод данных'.")
+        elif missing:
+            st.info(f"Сначала откройте вкладки: {', '.join(missing)}")
+        else:
+            discount_rate = (st.session_state.project_data.discount_rate or 10.0)
+
+            # ── Ввод пользователя ────────────────────────────────────────
+            st.subheader("Ввод эффектов по годам")
+
+            discount_rate = (st.session_state.project_data.discount_rate or 17.9)
+
+            # Инициализация пользовательских вводов
+            if "soc_eff_other_tax" not in st.session_state:
+                st.session_state.soc_eff_other_tax = {y: 0.0 for y in years}
+            if "soc_eff_price_eff" not in st.session_state:
+                st.session_state.soc_eff_price_eff = {y: 0.0 for y in years}
+            if "soc_eff_indirect_eff" not in st.session_state:
+                st.session_state.soc_eff_indirect_eff = {y: 0.0 for y in years}
+
+            with st.expander("✏️ Ввод прочих налоговых, ценовых и косвенных эффектов", expanded=False):
+                tabs_input = st.tabs(["Прочие налоговые эффекты", "Ценовые эффекты", "Косвенные эффекты"])
+
+                with tabs_input[0]:
+                    st.caption("Прочие налоговые эффекты (тыс. руб., постоянные цены)")
+                    cols = st.columns(min(len(years), 5))
+                    for idx, year in enumerate(years):
+                        with cols[idx % 5]:
+                            st.session_state.soc_eff_other_tax[year] = st.number_input(
+                                str(year), value=float(st.session_state.soc_eff_other_tax.get(year, 0.0)),
+                                step=1000.0, key=f"other_tax_{year}", label_visibility="visible"
+                            )
+
+                with tabs_input[1]:
+                    st.caption("Ценовые эффекты (тыс. руб., постоянные цены)")
+                    cols = st.columns(min(len(years), 5))
+                    for idx, year in enumerate(years):
+                        with cols[idx % 5]:
+                            st.session_state.soc_eff_price_eff[year] = st.number_input(
+                                str(year), value=float(st.session_state.soc_eff_price_eff.get(year, 0.0)),
+                                step=1000.0, key=f"price_eff_{year}", label_visibility="visible"
+                            )
+
+                with tabs_input[2]:
+                    st.caption("Косвенные эффекты (тыс. руб., постоянные цены)")
+                    cols = st.columns(min(len(years), 5))
+                    for idx, year in enumerate(years):
+                        with cols[idx % 5]:
+                            st.session_state.soc_eff_indirect_eff[year] = st.number_input(
+                                str(year), value=float(st.session_state.soc_eff_indirect_eff.get(year, 0.0)),
+                                step=1000.0, key=f"indirect_eff_{year}", label_visibility="visible"
+                            )
+
+            st.divider()
+
+            # ── Расчёт и отображение таблицы ────────────────────────────
+            soc_df = build_social_eff_matrix(
+                years=years,
+                taxes_df=taxes_df,
+                finance_df=finance_df,
+                cf_saldo_with=cf_saldo_with,
+                price_effects=st.session_state.soc_eff_price_eff,
+                indirect_effects=st.session_state.soc_eff_indirect_eff,
+                other_tax_effects=st.session_state.soc_eff_other_tax,
+                discount_rate=discount_rate,
+            )
+
+            st.session_state.soc_eff_df = soc_df
+
+            fmt = {year: "{:,.2f}" for year in years}
+
+            # Пустые строки-заголовки не форматируем
+            header_rows = {
+                "Налоговые эффекты",
+                "Налоговые эффекты Амурстали",
+                "Расчет дисконтированных ДП",
+                "Расчет дисконтированных эффектов",
+            }
+
+            def style_soc(row):
+                name = row["Наименование статьи"]
+                if name in header_rows:
+                    return ["font-weight: bold; background-color: #f0f2f6"] * len(row)
+                if name in ("Сальдо ДП для расчета общественной эффективности (без дисконтирования)",
+                            "Итого налоговые эффекты Амурстали",
+                            "Сальдо ДП для расчета коммерческой эффективности"):
+                    return ["font-weight: bold"] * len(row)
+                return [""] * len(row)
+
+            st.dataframe(
+                soc_df.style.format(fmt, na_rep="").apply(style_soc, axis=1),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+            # ── График ───────────────────────────────────────────────────
+            saldo_soc_vals = [
+                float(soc_df[soc_df["Наименование статьи"] ==
+                             "Сальдо ДП для расчета общественной эффективности (без дисконтирования)"
+                             ].iloc[0].get(y, 0.0) or 0.0) for y in years
+            ]
+            saldo_disc_vals = [
+                float(soc_df[soc_df["Наименование статьи"] ==
+                             "ДП ОЭ с дисконтированием"
+                             ].iloc[0].get(y, 0.0) or 0.0) for y in years
+            ]
+
+            fig_soc = go.Figure()
+            fig_soc.add_trace(go.Bar(
+                x=years, y=saldo_soc_vals,
+                name="Сальдо ДП ОЭ (без дисконт.)",
+                marker_color="#1f77b4"
+            ))
+            fig_soc.add_trace(go.Scatter(
+                x=years, y=saldo_disc_vals,
+                name="ДП ОЭ (дисконт.)",
+                mode="lines+markers",
+                line=dict(color="#d62728", width=2)
+            ))
+            fig_soc.add_hline(y=0, line_dash="dash", line_color="gray")
+            fig_soc.update_layout(
+                title="ДП общественной эффективности",
+                xaxis_title="Год",
+                yaxis_title="Тыс. руб.",
+                height=420,
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+            )
+            st.plotly_chart(fig_soc, use_container_width=True)
+
+    with tab_soc_eff_without:
+        st.header("🌍 ДП Общественной эффективности (без проекта)")
+
+        years = st.session_state.project_data.years
+        taxes_df = st.session_state.get("taxes_df")
+        cf_saldo_without = st.session_state.get("cf_saldo_without", {})
+
+        missing = []
+        if taxes_df is None:         missing.append("'🧾 Налоги'")
+        if not cf_saldo_without:     missing.append("'💵 ДП операц. и инвест.'")
+
+        if not years:
+            st.warning("Сначала укажите диапазон лет во вкладке '📝 Ввод данных'.")
+        elif missing:
+            st.info(f"Сначала откройте вкладки: {', '.join(missing)}")
+        else:
+            discount_rate = (st.session_state.project_data.discount_rate or 17.9) / 100.0
+
+            # ── Инициализация пользовательских вводов ────────────────────
+            if "soc_wo_other_tax" not in st.session_state:
+                st.session_state.soc_wo_other_tax = {y: 0.0 for y in years}
+            if "soc_wo_price_eff" not in st.session_state:
+                st.session_state.soc_wo_price_eff = {y: 0.0 for y in years}
+            if "soc_wo_indirect_eff" not in st.session_state:
+                st.session_state.soc_wo_indirect_eff = {y: 0.0 for y in years}
+
+            with st.expander("✏️ Ввод прочих налоговых, ценовых и косвенных эффектов", expanded=False):
+                tabs_input = st.tabs([
+                    "Прочие налоговые эффекты",
+                    "Ценовые эффекты",
+                    "Косвенные эффекты"
+                ])
+
+                with tabs_input[0]:
+                    st.caption("Прочие налоговые эффекты (тыс. руб., постоянные цены)")
+                    cols = st.columns(min(len(years), 5))
+                    for idx, year in enumerate(years):
+                        with cols[idx % 5]:
+                            st.session_state.soc_wo_other_tax[year] = st.number_input(
+                                str(year),
+                                value=float(st.session_state.soc_wo_other_tax.get(year, 0.0)),
+                                step=1000.0, key=f"wo_other_tax_{year}"
+                            )
+
+                with tabs_input[1]:
+                    st.caption("Ценовые эффекты (тыс. руб., постоянные цены)")
+                    cols = st.columns(min(len(years), 5))
+                    for idx, year in enumerate(years):
+                        with cols[idx % 5]:
+                            st.session_state.soc_wo_price_eff[year] = st.number_input(
+                                str(year),
+                                value=float(st.session_state.soc_wo_price_eff.get(year, 0.0)),
+                                step=1000.0, key=f"wo_price_eff_{year}"
+                            )
+
+                with tabs_input[2]:
+                    st.caption("Косвенные эффекты (тыс. руб., постоянные цены)")
+                    cols = st.columns(min(len(years), 5))
+                    for idx, year in enumerate(years):
+                        with cols[idx % 5]:
+                            st.session_state.soc_wo_indirect_eff[year] = st.number_input(
+                                str(year),
+                                value=float(st.session_state.soc_wo_indirect_eff.get(year, 0.0)),
+                                step=1000.0, key=f"wo_indirect_eff_{year}"
+                            )
+
+            st.divider()
+
+            # ── Расчёт таблицы ────────────────────────────────────────────
+            soc_wo_df = build_social_eff_without_matrix(
+                years=years,
+                taxes_df=taxes_df,
+                cf_saldo_without=cf_saldo_without,
+                price_effects=st.session_state.soc_wo_price_eff,
+                indirect_effects=st.session_state.soc_wo_indirect_eff,
+                other_tax_effects=st.session_state.soc_wo_other_tax,
+                discount_rate=discount_rate,
+            )
+
+            st.session_state.soc_eff_without_df = soc_wo_df
+
+            # ── Стилизация ────────────────────────────────────────────────
+            header_rows = {
+                "Налоговые эффекты",
+                "Налоговые эффекты Амурстали",
+                "Расчет дисконтированных ДП",
+                "Расчет дисконтированных эффектов",
+            }
+            bold_rows = {
+                "Итого налоговые эффекты Амурстали",
+                "Сальдо ДП для расчета коммерческой эффективности",
+                "ДП общественной эффективности",
+                "ДП общественной эффективности (с дисконтированием)",
+            }
+
+            def style_soc_wo(row):
+                name = row["Наименование статьи"]
+                if name in header_rows:
+                    return ["font-weight: bold; background-color: #f0f2f6"] * len(row)
+                if name in bold_rows:
+                    return ["font-weight: bold"] * len(row)
+                return [""] * len(row)
+
+            fmt = {year: "{:,.2f}" for year in years}
+            st.dataframe(
+                soc_wo_df.style.format(fmt, na_rep="").apply(style_soc_wo, axis=1),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+            # ── График ───────────────────────────────────────────────────
+            def get_row_vals(df, name):
+                rows = df[df["Наименование статьи"] == name]
+                if rows.empty:
+                    return [0.0] * len(years)
+                return [float(rows.iloc[0].get(y, 0.0) or 0.0) for y in years]
+
+            comm_vals = get_row_vals(soc_wo_df, "ДП коммерческой эффективности")
+            soc_vals = get_row_vals(soc_wo_df, "ДП общественной эффективности")
+            soc_disc_vals = get_row_vals(soc_wo_df, "ДП общественной эффективности (с дисконтированием)")
+
+            fig_wo = go.Figure()
+            fig_wo.add_trace(go.Bar(
+                x=years, y=comm_vals,
+                name="ДП коммерч. эфф. (без проекта)",
+                marker_color="#1f77b4"
+            ))
+            fig_wo.add_trace(go.Bar(
+                x=years, y=soc_vals,
+                name="ДП общ. эфф. (без проекта)",
+                marker_color="#2ca02c"
+            ))
+            fig_wo.add_trace(go.Scatter(
+                x=years, y=soc_disc_vals,
+                name="ДП общ. эфф. (дисконт.)",
+                mode="lines+markers",
+                line=dict(color="#d62728", width=2)
+            ))
+            fig_wo.add_hline(y=0, line_dash="dash", line_color="gray")
+            fig_wo.update_layout(
+                barmode="group",
+                title="ДП общественной эффективности (без проекта)",
+                xaxis_title="Год",
+                yaxis_title="Тыс. руб.",
+                height=420,
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+            )
+            st.plotly_chart(fig_wo, use_container_width=True)
 
     with tab_results:
         st.header("Анализ эффективности инвестиций")
